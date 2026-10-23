@@ -89,10 +89,11 @@ export function encodeJsonRows(text, { maxInputBytes = DEFAULT_MAX_BYTES } = {})
  * Throws when input is invalid or exceeds the configured byte limit.
  *
  * @param {string} text
- * @param {{maxInputBytes?: number}} [options]
+ * @param {{maxInputBytes?: number, maxOutputBytes?: number}} [options]
  * @returns {string}
  */
-export function decodeJsonRows(text, { maxInputBytes = DEFAULT_MAX_BYTES } = {}) {
+export function decodeJsonRows(text, { maxInputBytes = DEFAULT_MAX_BYTES, maxOutputBytes = DEFAULT_MAX_BYTES } = {}) {
+  if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1) throw new RangeError('Invalid maxOutputBytes')
   const envelope = parseExact(text, maxInputBytes)
   if (!isRecord(envelope) || Object.keys(envelope).length !== 4 ||
     !['format', 'version', 'schema', 'rows'].every(key => Object.hasOwn(envelope, key)) ||
@@ -102,6 +103,15 @@ export function decodeJsonRows(text, { maxInputBytes = DEFAULT_MAX_BYTES } = {})
     !Array.isArray(envelope.rows) || envelope.rows.length === 0 ||
     !envelope.rows.every(row => Array.isArray(row) && row.length === envelope.schema.length)) {
     throw new TypeError('Invalid dsh-json-rows envelope')
+  }
+  // Bound schema expansion before constructing any restored objects. A small
+  // envelope can otherwise repeat a very long key across thousands of rows.
+  const keyBytes = envelope.schema.reduce((total, key) => total + Buffer.byteLength(JSON.stringify(key)) + 1, 0)
+  let outputBytes = 2 + envelope.rows.length - 1
+  for (const row of envelope.rows) {
+    outputBytes += 2 + keyBytes + Math.max(0, row.length - 1)
+    for (const value of row) outputBytes += Buffer.byteLength(JSON.stringify(value))
+    if (outputBytes > maxOutputBytes) throw new RangeError('Decoded JSON exceeds output byte limit')
   }
   // fromEntries creates own data properties, including __proto__.
   const restored = envelope.rows.map(row => Object.fromEntries(

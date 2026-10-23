@@ -82,3 +82,16 @@ test('decoder rejects malformed or unsupported envelopes', () => {
   assert.throws(() => decodeJsonRows(JSON.stringify(valid).replace('[[1]]', '[[9007199254740992]]')))
   assert.throws(() => decodeJsonRows(JSON.stringify(valid).replace('"version":1', '"version":1,"version":1')))
 })
+
+test('decoding bounds repeated schema expansion before materializing output', () => {
+  const envelope = JSON.stringify({ format: 'dsh-json-rows', version: 1,
+    schema: ['k'.repeat(20000)], rows: Array.from({ length: 1000 }, () => [0]) })
+  assert.ok(Buffer.byteLength(envelope) < 25000)
+  assert.throws(() => decodeJsonRows(envelope, { maxInputBytes: 25000 }), /output byte limit/)
+  const small = JSON.stringify({ format: 'dsh-json-rows', version: 1, schema: ['名'], rows: [[1], [2]] })
+  const expected = '[{"名":1},{"名":2}]'
+  const bytes = Buffer.byteLength(expected)
+  assert.equal(decodeJsonRows(small, { maxOutputBytes: bytes }), expected)
+  assert.throws(() => decodeJsonRows(small, { maxOutputBytes: bytes - 1 }), RangeError)
+  assert.throws(() => decodeJsonRows(small, { maxOutputBytes: 0 }), RangeError)
+})
