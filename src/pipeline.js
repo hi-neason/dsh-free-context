@@ -1,29 +1,56 @@
-/**
- * Build a best-effort model-content transformer for dsh's post-execute waterfall.
- * The transformer receives a copy of content; returning undefined is a no-op.
- * It must not mutate execution metadata or perform untracked history rewrites.
- *
- * @param {((content: object[], exec: object) => Promise<object[] | undefined> | object[] | undefined) | undefined} [transform]
- * @param {(message: string) => void} warn
- */
-export function createPostExecuteHandler(transform, warn = () => {}) {
-  return async (exec, result, next) => {
-    // Let downstream policies finish before considering their model-facing content.
-    const decision = await next()
-    if (decision.kind !== 'accept' || Object.hasOwn(decision, 'value') ||
-        result.isError || exec.signal?.aborted || exec.parent !== undefined || !transform) return decision
+import { measureContent, reportDecision, safeWarn } from './diagnostics.js'
 
-    const content = decision.content ?? result.content
+/**
+ * Internal candidate protocol: { content, strategy, lossy? }; undefined means no strategy.
+ * The transformer receives copied content. Observe computes without replacing the decision.
+ * Diagnostic metrics are estimates, never provider billing evidence.
+ */
+export function createPostExecuteHandler(transform, warn = () => {}, options = {}) {
+  const { mode = 'observe', report = () => {}, estimator, eligible = () => true } = options
+  return async (exec, result, next) => {
+    const decision = await next()
+    const started = performance.now()
+    let input
+    let output
+    let strategy
+    let lossy
+    const finish = async (outcome, reason, returned = decision) => {
+      await reportDecision(report, warn, {
+        tool: exec.name, callId: exec.callId,
+        ...(exec.agent?.session?.header?.id !== undefined ? { sessionId: exec.agent.session.header.id } : {}),
+        mode, outcome, reason,
+        ...(strategy ? { strategy, lossy: lossy === true } : {}),
+        ...(input ? { input } : {}), ...(output ? { output } : {}),
+        estimateKind: 'serialized-content-utf8-heuristic', elapsedMs: performance.now() - started,
+      })
+      return exec.signal?.aborted ? decision : returned
+    }
+    const skip = decision.kind !== 'accept' ? 'blocked' : Object.hasOwn(decision, 'value') ? 'value-replacement' :
+      result.isError ? 'tool-failure' : exec.signal?.aborted ? 'aborted' :
+        exec.parent !== undefined ? 'ptc-internal' : mode === 'off' ? 'disabled' : undefined
+    if (skip) return finish('skipped', skip)
+
     try {
-      const replacement = await transform(structuredClone(content), exec)
-      if (replacement === undefined || exec.signal?.aborted) return decision
-      if (!Array.isArray(replacement)) throw new TypeError('Transformer must return content blocks or undefined')
-      return { ...decision, content: replacement }
+      const content = decision.content ?? result.content
+      input = measureContent(content, estimator)
+      output = input
+      if (!eligible(exec, input.bytes)) return finish('skipped', 'ineligible')
+      if (!transform) return finish('eligible', 'no-strategy')
+      const candidate = await transform(structuredClone(content), exec)
+      if (exec.signal?.aborted) return finish('skipped', 'aborted')
+      if (candidate === undefined) return finish('eligible', 'no-strategy')
+      if (!candidate || !Array.isArray(candidate.content) || typeof candidate.strategy !== 'string' || !candidate.strategy.trim() ||
+          (candidate.lossy !== undefined && typeof candidate.lossy !== 'boolean')) throw new TypeError('Invalid candidate')
+      strategy = candidate.strategy
+      lossy = candidate.lossy
+      output = measureContent(candidate.content, estimator)
+      return mode === 'apply'
+        ? finish('selected', 'candidate', { ...decision, content: candidate.content })
+        : finish('observed', 'candidate')
     } catch {
-      // Diagnostics must never turn a successful tool call into a failed call.
-      // Avoid logging tool content or potentially sensitive exception messages.
-      try { warn('dsh-free-context: content transformation failed; keeping original content') } catch {}
-      return decision
+      output = input
+      safeWarn(warn, 'dsh-free-context: content transformation failed; keeping original content')
+      return finish('fallback', 'transformation-failed')
     }
   }
 }

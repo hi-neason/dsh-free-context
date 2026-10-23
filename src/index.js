@@ -1,4 +1,4 @@
-import { parseConfig } from './config.js'
+import { isEligibleInput, parseConfig } from './config.js'
 export { Config } from './config.js'
 import { createPostExecuteHandler } from './pipeline.js'
 
@@ -12,5 +12,10 @@ export function apply(ctx, input) {
   ctx.on('tools/post-execute', createPostExecuteHandler(
     undefined,
     message => ctx.logger.warn(message),
+    {
+      mode: config.mode,
+      eligible: (exec, bytes) => isEligibleInput(config, exec.name, bytes),
+      report: record => ctx.parallel('free-context/decision', record),
+    },
   ), { prepend: true })
 }

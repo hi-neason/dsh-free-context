@@ -16,8 +16,8 @@ test('waits for downstream and transforms its content while preserving decision 
   const handler = createPostExecuteHandler(async content => {
     assert.equal(downstreamDone, true)
     assert.deepEqual(content, blocks('downstream'))
-    return blocks('compressed')
-  })
+    return { content: blocks('compressed'), strategy: 'fixture' }
+  }, undefined, { mode: 'apply' })
   const actual = await handler(execution(), original, async () => {
     await Promise.resolve()
     downstreamDone = true
@@ -49,7 +49,7 @@ test('aborting an asynchronous transformation preserves downstream decision', as
   const decision = { kind: 'accept' }
   const handler = createPostExecuteHandler(async () => {
     controller.abort()
-    return blocks('ignored')
+    return { content: blocks('ignored'), strategy: 'fixture' }
   })
   assert.equal(await handler({ ...execution(), signal: controller.signal }, result(), async () => decision), decision)
 })
@@ -88,7 +88,7 @@ test('named function plugin registers only the prepended post-execute policy', a
   assert.equal('default' in plugin, false)
   assert.deepEqual(plugin.inject, ['tools'])
   const listeners = []
-  plugin.apply({ on: (...args) => listeners.push(args), logger: { warn: assert.fail } }, { tools: ['fixture'] })
+  plugin.apply({ on: (...args) => listeners.push(args), logger: { warn: assert.fail }, parallel: async () => {} }, { tools: ['fixture'] })
   assert.equal(listeners.length, 1)
   const [event, handler, options] = listeners[0]
   assert.equal(event, 'tools/post-execute')

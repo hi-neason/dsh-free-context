@@ -49,8 +49,8 @@ test('official runtime loads named exports, composes real tool policies, and dis
       scope.on('tools/post-execute', createPostExecuteHandler(content => {
         events.push('transform')
         assert.deepEqual(content, blocks('downstream'))
-        return blocks('transformed')
-      }), { prepend: true })
+        return { content: blocks('transformed'), strategy: 'fixture' }
+      }, undefined, { mode: 'apply' }), { prepend: true })
     },
   })
   const transformed = await ctx.tools.execute(exec())
@@ -78,4 +78,24 @@ test('official runtime validates plugin config, freezes normalized values, and a
   assert.equal(Object.isFrozen(fiber.config), true)
   assert.equal(Object.isFrozen(fiber.config.tools), true)
   await fiber.dispose()
+})
+
+test('official runtime diagnostic subscriptions isolate rejected observers in observe and apply modes', async t => {
+  for (const mode of ['observe', 'apply']) {
+    const ctx = new Context()
+    t.after(() => ctx.fiber.dispose())
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    ctx.tools.register(defineContentToolFixture({ name: 'fixture', description: 'fixture', parameters: {}, execute: async () => blocks('original') }))
+    const records = []
+    ctx.on('free-context/decision', record => { records.push(record) })
+    ctx.on('free-context/decision', async () => { throw new Error('private observer error') })
+    await ctx.plugin(plugin, { mode, tools: ['fixture'], minInputBytes: 0 })
+    const output = await ctx.tools.execute(exec())
+    assert.equal(output.isError, false)
+    assert.deepEqual(output.content, blocks('original'))
+    assert.equal(records.length, 1)
+    assert.equal(records[0].mode, mode)
+    assert.equal(records[0].reason, 'no-strategy')
+  }
 })
