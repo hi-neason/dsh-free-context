@@ -46,7 +46,11 @@ class ReplayAdapter extends LlmAdapter {
     this.calls++
     let block
     if (this.calls === 1) block = { type: 'tool-call', id: 'fixture-1', name: 'fixture', arguments: '{}' }
-    else if (this.calls === 2 && (this.fixture.kind === 'tap' || this.delivered().includes('[...]'))) block = { type: 'tool-call', id: 'read-1', name: 'read', arguments: JSON.stringify({ file_path: this.snapshotPath() ?? this.source, offset: this.fixture.kind === 'tap' ? 280 : 240, limit: this.fixture.kind === 'tap' ? 35 : 12 }) }
+    else if ((this.calls === 2 && (this.fixture.kind === 'tap' || this.delivered().includes('[...]'))) ||
+      (this.snapshotPath() && this.lastReadPath !== this.snapshotPath())) {
+      this.lastReadPath = this.snapshotPath() ?? this.source
+      block = { type: 'tool-call', id: `read-${this.calls}`, name: 'read', arguments: JSON.stringify({ file_path: this.lastReadPath, offset: this.fixture.kind === 'tap' ? 280 : 240, limit: this.fixture.kind === 'tap' ? 35 : 12 }) }
+    }
     else {
       const text = this.delivered().replace(/^\s*\d+[:→|]\s?/gm, '')
       let answer = null
@@ -97,7 +101,7 @@ export function priceUsage(usage, prices) {
   return Number.isFinite(cost) ? cost : null
 }
 
-export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, timeoutMs = criteria.timeoutMs } = {}) {
+export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs } = {}) {
   if (!groups.includes(group)) throw new TypeError('Unknown evaluation group')
   if (!replay && !key) throw new TypeError('Missing explicit credential')
   const directory = await mkdtemp(join(tmpdir(), 'dsh-agent-eval-'))
@@ -108,6 +112,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
   let timer
   const decisions = []
   const toolCalls = []
+  const retirements = []
   let steps = 0
   let stoppedReason
   let snapshotPath
@@ -122,7 +127,21 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     // Actual official policy composition; the base bundle declares 12500.
     const maxInlineTokens = group === 'baseline-tuned' ? 1200 : 12500
     await ctx.plugin(SpillPolicy, { maxInlineTokens })
-    if (group === 'plugin') await ctx.plugin(plugin, { mode: 'apply', tools: ['fixture'], minInputBytes: 0, logs: { enabled: true } })
+    if (historyRetirement) {
+      const { default: TokenMeter } = await load('dsh-token-meter')
+      await ctx.plugin(TokenMeter)
+      ctx.on('free-context/retirement', record => {
+        retirements.push({ ...record, beforeStep: steps + 1 })
+        if (record.reason === 'retired') {
+          const text = agent.session.eventAt(record.replacementSeq).data.message.content[0].text
+          const reference = text.match(/Original tool-result snapshot: (\{[^\n]+\})/)
+          if (reference) snapshotPath = JSON.parse(reference[1]).locator
+        }
+      })
+    }
+    if (group === 'plugin') await ctx.plugin(plugin, historyRetirement
+      ? { mode: 'apply', tools: [], retirement: historyRetirement }
+      : { mode: 'apply', tools: ['fixture'], minInputBytes: 0, logs: { enabled: true } })
     ctx.on('free-context/decision', record => decisions.push(record))
     ctx.on('tools/post-execute', async (exec, result, next) => {
       const decision = await next()
@@ -156,13 +175,17 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     try { actual = JSON.parse(text) } catch { actual = null }
     const exactFacts = isDeepStrictEqual(actual, fixture.expected)
     const requiredTools = toolCalls.some(call => call.name === 'fixture') && (fixture.kind !== 'tap' || toolCalls.some(call => call.name === 'read' && !call.isError))
-    const snapshotRecovered = fixture.kind !== 'tap' || group !== 'plugin' || toolCalls.some(call => call.readSnapshot && !call.isError)
+    const snapshotRecoveryRequired = fixture.kind === 'tap' && group === 'plugin' &&
+      (!historyRetirement || retirements.some(record => record.reason === 'retired'))
+    const snapshotRecovered = !snapshotRecoveryRequired || toolCalls.some(call => call.readSnapshot && !call.isError)
     const passed = exactFacts && requiredTools && snapshotRecovered && !stoppedReason && attempts.length === 0 && steps <= criteria.maxSteps
-    return { task: fixture.id, group, replay, passed, exactFacts, requiredTools, snapshotRecovered, actual, finalAnswer: text ?? null, startedAt, steps,
+    return { task: fixture.id, group, replay, passed, exactFacts, requiredTools, snapshotRecoveryRequired, snapshotRecovered, actual, finalAnswer: text ?? null, startedAt, steps,
       attempts: attempts.length, usageComplete,
       usageKind: replay ? 'synthetic-replay' : 'provider-reported', usage,
       estimatedCostUSD: replay || !usageComplete ? null : priceUsage(usage, prices), pricing: prices ?? null,
       elapsedMs: performance.now() - started, stoppedReason, toolCalls,
+      ...(historyRetirement ? { historyRetirement, retirements: retirements.map(record => ({ ...record,
+        ...(record.reason === 'retired' ? { actualPostRetirementSteps: steps - record.beforeStep + 1 } : {}) })) } : {}),
       decisions: decisions.map(({ strategy, outcome, reason, input, output }) => ({ strategy, outcome, reason, input, output })),
       configuration: { maxInlineTokens, plugin: group === 'plugin' },
       turnEnds: events.filter(event => event.type === 'turn/end').map(event => ({ kind: event.data.reason.kind, code: event.data.reason.error?.code })),

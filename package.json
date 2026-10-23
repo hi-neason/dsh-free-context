@@ -15,15 +15,22 @@
     "./text-selection": "./src/text-selection.js",
     "./diagnostic-evidence": "./src/diagnostic-evidence.js"
   },
-  "files": ["src", "README.md", "LICENSE"],
-  "engines": { "node": ">=24" },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "test": "node --test test/*.test.js",
     "check": "node scripts/check.js",
     "test:integration": "node --test test/integration/*.test.js",
     "evaluate": "node scripts/evaluate.js",
     "evaluate:agent": "node scripts/evaluate-agent.js",
-    "evaluate:live": "node scripts/evaluate-live.js"
+    "evaluate:live": "node scripts/evaluate-live.js",
+    "evaluate:retirement": "node scripts/evaluate-retirement.js"
   },
   "license": "MIT"
 }

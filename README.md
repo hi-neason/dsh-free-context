@@ -228,7 +228,7 @@ ctx.provide('freeContextTaskState', {
 
 未知、进行中或缺失状态拒绝退场，不解析 planner 文本。归档完成后重新校验状态；每个 `boundaryId` 的退场标记持久化，恢复后不重复执行该边界。真实快照回读测试覆盖恢复、fork 和卸载后的 read；已验证字节相等的测试限于 LF 样本，后端访问控制仍由宿主管理。
 
-底层 `resolveRetirementConfig`、`retireHistory` 和 `installRetirement` 也由 `dsh-free-context/retirement` 导出。历史退场是有损的模型上下文缩减，原日志与快照可恢复不等于模型任务语义无损；目前没有真实模型完整任务质量或净费用收益结论。
+底层 `resolveRetirementConfig`、`retireHistory` 和 `installRetirement` 也由 `dsh-free-context/retirement` 导出。历史退场是有损的模型上下文缩减，原日志与快照可恢复不等于模型任务语义无损；已有下文受控历史退场完整任务实测，但未证明一般工作负载收益。
 
 ## 可选的任务无关段落选择实验
 
@@ -422,3 +422,27 @@ DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:agent -- \
 首轮不是全通过：JSON 三组通过，TAP 调优组答复未满足 JSON 验收，插件组事实正确但读取了原文件而非指定快照。随后对三组使用相同的明确快照优先与 JSON 输出要求，再运行完整套件得到上表；首轮失败未被当作成功或从历史记录删除。这是调整过任务说明后的结果，不能用作未见样本的泛化证明。
 
 任务按固定组顺序执行，共享 provider cache，存在顺序和缓存混杂；样本仅两个、每组一次。以上不证明一般 coding 任务收益，也不证明历史退场或其他未参与策略的净收益。后续需要固定任务说明、多次重复并交错组序、扩充真实工作负载，再评估质量与费用分布。
+
+
+### 历史退场与经济预测的完整任务复核
+
+```sh
+DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:retirement -- --replay
+DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:retirement -- \
+  --credential-file /private/path/deepseek.key --pricing-file /private/path/pricing.json \
+  --model deepseek-flash
+```
+
+该 runner 对同一 TAP 快照问题运行默认、调优和历史退场三组；插件组关闭即时 JSON/TAP 策略，实际通过 `agent/pre-step` 退场并使用官方 read 回读原始快照。脚本是明确的乐观预测压力场景，仅接受 `deepseek-flash`：实验事先声明未来 200 次请求、预期回读费用 0、peak 输入价 0.3/缓存读价 0.006 USD/百万 token、安全余量 25%；这些不是产品默认值或对实际任务的预测。实验把最小曝光配置为 1，产品默认仍为 2。实际费用另按明确提供的价格与全部 provider usage 计算。
+
+2026-10-23 UTC 09:48 的修订统一查询中，三组均通过精确事实验收且各执行 4 个模型步骤；插件实际退场后仅剩 **2 次**模型请求，并成功回读快照：
+
+| 组 | 完整任务费用估算 USD |
+| --- | ---: |
+| 默认 | 0.001816644 |
+| 调优 | 0.001570512 |
+| 历史退场 | 0.001988868 |
+
+插件比默认贵 $0.000172224、比调优贵 $0.000418356。门槛在未来 200 次假设下预测保守净收益 $0.000807534、回本需 103 次，但实际只有 2 次；预期回读费用为零也不符合该任务。这说明乐观假设不能替代实测，短任务可能负收益。相同任务使用未来 2/5 次假设的官方 AgentLoop 回放均拒绝退场，保持完整任务质量；这是控制流证据，不是额外真实模型实测。
+
+首轮未来 100 次假设被真实经济门槛拒绝，默认和插件组答复还未满足严格 JSON 输出要求。保留首轮失败后，对三组统一强化最终输出要求，再以明确标注的 200 次压力假设运行上表；不能把这种修订当作泛化质量或预测准确率证明。固定组序、共享缓存和每组一次的限制仍然适用，费用是估算而非账单扣款。
