@@ -5,3 +5,11 @@
 # Design and research documents kept local for now
 /docs/ROADMAP.md
 /docs/PAPERS.md
+
+# Dependencies and local execution artifacts
+/node_modules/
+/.omx/
+/.omx-state-locks/
+/.omx-state-locks.identity.json
+/coverage/
+*.tgz
