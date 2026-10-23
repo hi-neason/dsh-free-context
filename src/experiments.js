@@ -71,7 +71,7 @@ export function apply(ctx, input) {
       reason = 'snapshot-failed'
       const originalReceipt = await archiveOriginal(store, exec, content[0].text, { maxBytes: config.maxInputBytes })
       reason = 'selection-failed'
-      selection = await select({ kind: 'prose', text: content[0].text, session: exec.agent?.session, signal: exec.signal, query })
+      selection = await select({ kind: config.selectionMode === 'diagnostic-evidence' ? 'diagnostic' : 'prose', text: content[0].text, session: exec.agent?.session, signal: exec.signal, query })
       estimatedCost = selection.cacheHit ? 0 : callCost(selection.callUsage, pricing)
       if (!queryIsCurrent()) { reason = 'query-changed'; return undefined }
       if (selection.status !== 'selected') { reason = selection.reason; return undefined }
@@ -79,13 +79,13 @@ export function apply(ctx, input) {
       if (estimatedCost > config.maxCallCost) { reason = 'actual-call-cost-budget'; return undefined }
       reason = 'manifest-failed'
       const manifest = JSON.stringify({ version: 1, policy: selection.strategy, sourceHash: selection.sourceHash, queryHash: selection.queryHash,
-        originalReceipt, selectedSpans: selection.spans.map(({ id, start, end }) => ({ id, start, end })),
+        originalReceipt, selectedSpans: selection.spans.map(({ id, start, end, startLine, endLine, guards }) => ({ id, start, end, startLine, endLine, guards })),
         budgets: { maxQueryBytes: config.maxQueryBytes, maxInputBytes: config.maxInputBytes, maxPromptBytes: config.maxPromptBytes, maxOutputBytes: config.maxOutputBytes, maxOutputTokens: config.maxOutputTokens, timeoutMs: config.timeoutMs },
         audit: selection.audit, cacheHit: selection.cacheHit, callUsage: selection.callUsage,
         originUsage: selection.originUsage, currency: pricing.currency, estimatedCost,
       })
       const manifestReceipt = await archiveOriginal(store, exec, manifest, { maxBytes: config.maxArtifactBytes })
-      const text = [`[LOSSY paragraph selection; policy ${selection.strategy}. Extracted source spans do not prove complete evidence.]`,
+      const text = [`[LOSSY ${config.selectionMode === 'diagnostic-evidence' ? 'diagnostic evidence' : 'paragraph'} selection; policy ${selection.strategy}. Extracted source spans do not prove complete evidence.]`,
         selection.text, formatSnapshotReference(originalReceipt),
         'Auxiliary selection audit manifest (full request, response and usage):', formatSnapshotReference(manifestReceipt)].join('\n\n')
       const replacement = [{ ...content[0], text }]

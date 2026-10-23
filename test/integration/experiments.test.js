@@ -45,7 +45,7 @@ async function setup(t, behavior = {}) {
     }
   }
   ctx.llm.registerAdapter(['selection-fixture'], new Adapter())
-  ctx.tools.register(defineContentToolFixture({ name: 'prose', description: 'prose', parameters: {}, execute: async () => [{ type: 'text', text }] }))
+  ctx.tools.register(defineContentToolFixture({ name: 'prose', description: 'prose', parameters: {}, execute: async () => [{ type: 'text', text: behavior.text ?? text }] }))
   const records = []
   ctx.on('free-context/experiment', record => { records.push(record) })
   const exec = { name: 'prose', callId: 'prose-call', arguments: {}, agent: { session: { header: { id: 'experiment-session' } } }, signal: behavior.cancel?.signal ?? new AbortController().signal }
@@ -153,4 +153,39 @@ test('official runtime rejects stale selection after asynchronous query-changing
   const output = await ctx.tools.execute(exec)
   assert.deepEqual(output.content, [{ type: 'text', text }])
   assert.equal(calls.length, 1)
+})
+
+const diagnosticText = ['src/main.ts(12,3): error TS2322: wrong type.\n  at src/caller.ts:8:2', ...Array.from({ length: 30 }, () => 'INFO: ' + 'Ordinary progress continues smoothly. '.repeat(15)), 'Status: failed; Errors: 1', 'Exit code: 2'].join('\n\n')
+const selectRequired = request => JSON.stringify({ selectedIds: JSON.parse(request.messages[0].content[0].text.split('\n').at(-1)).requiredIds })
+test('official diagnostic experiment preserves errors/status/locations and archives full provenance', async t => {
+  const { ctx, exec, calls, records } = await setup(t, { text: diagnosticText, responseFor: selectRequired })
+  const baseline = await ctx.tools.execute(exec)
+  await ctx.plugin(Experiments, options({ selectionMode: 'diagnostic-evidence', maxCacheEntries: 2 }))
+  const output = await ctx.tools.execute(exec)
+  assert.deepEqual(output.value, baseline.value)
+  assert.ok(output.content[0].text.includes('LOSSY diagnostic evidence selection'))
+  for (const evidence of ['TS2322', 'src/caller.ts:8:2', 'Status: failed; Errors: 1', 'Exit code: 2']) assert.ok(output.content[0].text.includes(evidence))
+  const refs = output.content[0].text.split('\n').filter(line => line.startsWith('Original tool-result snapshot: ')).map(line => JSON.parse(line.slice('Original tool-result snapshot: '.length)))
+  assert.equal(await readFile(refs[0].locator, 'utf8'), diagnosticText)
+  const manifest = JSON.parse(await readFile(refs[1].locator, 'utf8'))
+  assert.equal(manifest.sourceHash, refs[0].sha256)
+  assert.equal(manifest.selectedSpans[0].startLine, 1)
+  assert.equal(manifest.selectedSpans[0].endLine, 2)
+  assert.ok(manifest.selectedSpans[0].guards.codes.includes('TS2322'))
+  assert.equal(manifest.callUsage.outputTokens, 10)
+  await ctx.tools.execute(exec)
+  assert.equal(calls.length, 1)
+  assert.equal(records.at(-1).estimatedCost, 0)
+})
+test('official diagnostic experiment falls back for unknown formats, missing usage and cancellation', async t => {
+  for (const extra of [{ text: diagnosticText + '\n\nunknown format' }, { noUsage: true }, { cancel: new AbortController() }]) {
+    const behavior = { text: diagnosticText, responseFor: selectRequired, ...extra }
+    const { ctx, exec, calls, records } = await setup(t, behavior)
+    await ctx.plugin(Experiments, options({ selectionMode: 'diagnostic-evidence', maxCacheEntries: 2 }))
+    const output = await ctx.tools.execute(exec)
+    assert.equal(JSON.stringify(output.content).includes('LOSSY diagnostic evidence selection'), false)
+    if (extra.text) assert.equal(calls.length, 0)
+    else if (extra.noUsage) assert.equal(records[0].reason, 'missing-priced-usage')
+    else assert.equal(output.isError, true)
+  }
 })

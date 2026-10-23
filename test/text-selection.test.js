@@ -215,3 +215,37 @@ test('query mode rejects absent/oversized queries before calling; independent mo
   assert.equal(llm.calls[0].messages[0].content[0].text.includes('MUST_NOT_FORWARD'), false)
   assert.throws(() => createTextSelector({ ...config(llm), selectionMode: 'query-dependent' }), /maxQueryBytes/)
 })
+
+const diagnostics = 'src/main.ts(12,3): error TS2322: wrong type.\n  at src/caller.ts:8:2\n\nINFO: ordinary progress.\n\nStatus: failed; Errors: 1\n\nExit code: 2'
+const diagnosticOptions = llm => ({ ...config(llm), selectionMode: 'diagnostic-evidence', protectedTerms: [] })
+test('diagnostic mode preserves mandatory exact evidence, line provenance and session cache usage', async () => {
+  const llm = runtime('{"selectedIds":["d4","d1","d3"]}')
+  const select = createTextSelector(diagnosticOptions(llm))
+  const session = {}
+  const result = await select({ kind: 'diagnostic', text: diagnostics, session })
+  assert.equal(result.status, 'selected')
+  assert.deepEqual(result.selectedIds, ['d1', 'd3', 'd4'])
+  assert.equal(result.strategy, 'diagnostic-evidence-selection-v1')
+  assert.equal(result.spans[0].startLine, 1)
+  assert.equal(result.spans[0].endLine, 2)
+  for (const span of result.spans) assert.equal(span.text, diagnostics.slice(span.start, span.end))
+  assert.ok(result.text.includes('TS2322'))
+  assert.ok(result.text.includes('src/caller.ts:8:2'))
+  const cached = await select({ kind: 'diagnostic', text: diagnostics, session })
+  assert.equal(cached.cacheHit, true)
+  assert.equal(cached.callUsage, undefined)
+  assert.equal(llm.calls.length, 1)
+  const payload = JSON.parse(llm.calls[0].messages[0].content[0].text.split('\n').at(-1))
+  assert.deepEqual(payload.requiredIds, ['d1', 'd3', 'd4'])
+})
+test('diagnostic omission and optional protected terms fail closed; unknown formats never call model', async () => {
+  for (const selectedIds of [['d1', 'd3'], ['d3', 'd4'], ['d1', 'd4']]) {
+    const select = createTextSelector(diagnosticOptions(runtime(JSON.stringify({ selectedIds }))))
+    assert.equal((await select({ kind: 'diagnostic', text: diagnostics })).reason, 'protected-diagnostic-omitted')
+  }
+  const protectedSelect = createTextSelector({ ...diagnosticOptions(runtime('{"selectedIds":["d1","d3","d4"]}')), protectedTerms: ['ordinary'] })
+  assert.equal((await protectedSelect({ kind: 'diagnostic', text: diagnostics })).reason, 'protected-diagnostic-omitted')
+  const llm = runtime()
+  assert.equal((await createTextSelector(diagnosticOptions(llm))({ kind: 'diagnostic', text: diagnostics + '\n\nunknown result' })).reason, 'unrecognized-diagnostic-block')
+  assert.equal(llm.calls.length, 0)
+})

@@ -11,7 +11,8 @@
     "./economics": "./src/economics.js",
     "./retirement": "./src/retirement.js",
     "./experiments": "./src/experiments.js",
-    "./text-selection": "./src/text-selection.js"
+    "./text-selection": "./src/text-selection.js",
+    "./diagnostic-evidence": "./src/diagnostic-evidence.js"
   },
   "files": ["src", "README.md", "LICENSE"],
   "engines": { "node": ">=24" },

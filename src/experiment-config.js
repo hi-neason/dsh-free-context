@@ -18,7 +18,7 @@ function strings(value, label) {
 export function parseExperimentConfig(input = {}) {
   object(input, keys, 'experiment config')
   const config = { selectionMode: 'task-independent', mode: 'off', tools: [], maxCacheEntries: 0, protectedTerms: [], minSavingsTokens: 32, ...input }
-  if (!['task-independent', 'query-dependent'].includes(config.selectionMode)) throw new TypeError('Invalid selectionMode')
+  if (!['task-independent', 'query-dependent', 'diagnostic-evidence'].includes(config.selectionMode)) throw new TypeError('Invalid selectionMode')
   if (!['off', 'observe', 'apply'].includes(config.mode)) throw new TypeError('Invalid mode')
   config.tools = strings(config.tools, 'tools')
   if (config.tools.some(tool => /\s/.test(tool))) throw new TypeError('Tool names must not contain whitespace')
