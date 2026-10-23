@@ -143,6 +143,35 @@ tracking.dispose() // 移除监听并丢弃优化元数据；所属 Cordis 上�
 
 此辅助接口不会自动加载到主插件，也不归档、删除或替换历史消息。调用方可用 `callId` 关联持久化原文引用；后续历史优化仍须写入受支持的 Session 决策。版本只反映宿主发出的观察，无法检测未发出事件的外部修改，不是文件锁或实时新鲜度保证。实际 fs-local/tool-fs 组合测试覆盖部分读取、完整读取、修改后的版本变化和字节上限导致的真实返回范围。
 
+## 缓存与净收益预测
+
+经济门槛作为独立纯函数提供，目前不会自动加载或控制主插件路由：
+
+```js
+import { assessNetBenefit } from 'dsh-free-context/economics'
+
+const decision = assessNetBenefit({
+  originalTokens: 20000,
+  candidateTokens: 10000,
+  invalidatedPrefixTokens: 1000,
+  minimumFutureRequests: 20,
+  // 仅为演示数字，不是任何供应商的报价。
+  pricing: { uncachedInputPerMillion: 10, cacheReadPerMillion: 2 },
+  compressionCost: 0.02,
+  expectedRecoveryCost: 0.01,
+  safetyMargin: 0.25,
+})
+console.log(decision.adopt, decision.reason, decision.conservativeNetBenefit)
+```
+
+调用方必须明确提供 token 数、失效且需重建的保留前缀 token 数、未来请求数假设、价格、压缩总费用、预期回读总费用与安全余量。所有金额使用同一货币单位；价格是每百万 token 的单价，压缩和回读费用是本次决策的增量总费用，不是每轮价格。缺少必需输入时返回 `adopt: false` 和缺失原因；负值、非有限数、错误类型、不安全整数等无效输入会抛错。`safetyMargin` 范围为 `[0, 1)`。
+
+保守基线假设将被移除的原 token 在未来请求中全部命中缓存，因此节省按“移除 token × cache-read 单价 × 假设请求数”计算。前缀只计算一次重建，并仅计入重建单价超过 cache-read 单价的非负差额；重建单价使用可选 `cacheWritePerMillion`，未提供时使用 `uncachedInputPerMillion`，两者不相加。若供应商写缓存费用是附加价，调用方必须先转换为本函数要求的完整替代单价。`invalidatedPrefixTokens` 不含已移除 token，压缩/回读费用不得再次包含此处已计入的前缀重建费用；其他额外模型输入、输出费用应纳入这些显式总额。
+
+函数从预测毛节省中预留 `safetyMargin` 比例，再扣除全部增量成本，仅在剩余净收益严格大于零时建议采用。`breakEvenRequests` 是在同一假设下跨过保守门槛的最小整数请求数；无法给出安全有限阈值时为 `null`。无压缩、无未来请求或缓存读价为零均不采用。
+
+这些输出是基于调用方价格和未来请求假设的预测，不是账单证据，也不保证预测轮次一定发生。反复失效需要重新评估；模型质量、额外回合和真实缓存行为仍需完整任务对照验证。
+
 ## 验证
 
 ```sh
