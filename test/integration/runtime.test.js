@@ -99,3 +99,74 @@ test('official runtime diagnostic subscriptions isolate rejected observers in ob
     assert.equal(records[0].reason, 'no-strategy')
   }
 })
+
+const jsonRows = Array.from({ length: 40 }, (_, i) => ({ very_long_identifier: i, repeated_description_field: `value-${i}`, repeated_state_field: 'ok' }))
+const jsonText = JSON.stringify(jsonRows)
+
+test('production router compares baseline, observe and apply on real tools while preserving value and downstream contexts', async t => {
+  const ctx = new Context()
+  t.after(() => ctx.fiber.dispose())
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  ctx.tools.register(defineContentToolFixture({ name: 'fixture', description: 'fixture', parameters: {}, execute: async () => blocks('tool original') }))
+  const contexts = [{ role: 'user', content: blocks('additional evidence') }]
+  ctx.on('tools/post-execute', async (_exec, _result, next) => ({ ...await next(), content: blocks(jsonText), additionalContexts: contexts }))
+  const baseline = await ctx.tools.execute(exec())
+  const records = []
+  ctx.on('free-context/decision', record => { records.push(record) })
+  const observe = await ctx.plugin(plugin, { mode: 'observe', tools: ['fixture'], minInputBytes: 0 })
+  assert.deepEqual(await ctx.tools.execute(exec()), baseline)
+  assert.equal(records.at(-1).outcome, 'observed')
+  assert.equal(records.at(-1).strategy, 'json-rows-v1')
+  await observe.dispose()
+  const apply = await ctx.plugin(plugin, { mode: 'apply', tools: ['fixture'], minInputBytes: 0 })
+  const transformed = await ctx.tools.execute(exec())
+  assert.equal(transformed.isError, false)
+  assert.equal(JSON.parse(transformed.content[0].text).format, 'dsh-json-rows')
+  assert.deepEqual(transformed.value, baseline.value)
+  assert.deepEqual(transformed.additionalContexts, baseline.additionalContexts)
+  assert.equal(records.at(-1).outcome, 'selected')
+  await apply.dispose()
+  assert.deepEqual(await ctx.tools.execute(exec()), baseline)
+})
+
+test('real runtime preserves results for unlisted tools, excessive savings threshold, PTC, failure and value decisions', async t => {
+  for (const scenario of ['unlisted', 'threshold', 'ptc', 'failure', 'value']) {
+    const ctx = new Context()
+    t.after(() => ctx.fiber.dispose())
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    ctx.tools.register(defineContentToolFixture({ name: 'fixture', description: 'fixture', parameters: {}, execute: async () => {
+      if (scenario === 'failure') throw new Error('fixture failure')
+      return blocks(jsonText)
+    } }))
+    if (scenario === 'value') ctx.on('tools/post-execute', async (_exec, _result, next) => ({ ...await next(), value: blocks('replacement value') }))
+    const execution = scenario === 'ptc' ? { ...exec(), parent: 'parent-call' } : exec()
+    const baseline = await ctx.tools.execute(execution)
+    const records = []
+    ctx.on('free-context/decision', record => { records.push(record) })
+    await ctx.plugin(plugin, { mode: 'apply', tools: [scenario === 'unlisted' ? 'other' : 'fixture'], minInputBytes: 0, minSavingsTokens: scenario === 'threshold' ? 1000000 : 32 })
+    assert.deepEqual(await ctx.tools.execute(execution), baseline)
+    assert.equal(records.at(-1).reason, { unlisted: 'ineligible', threshold: 'no-strategy', ptc: 'ptc-internal', failure: 'tool-failure', value: 'value-replacement' }[scenario])
+  }
+})
+
+test('real runtime cancellation after candidate selection does not return compressed content', async t => {
+  const ctx = new Context()
+  t.after(() => ctx.fiber.dispose())
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  ctx.tools.register(defineContentToolFixture({ name: 'fixture', description: 'fixture', parameters: {}, execute: async () => blocks(jsonText) }))
+  const controller = new AbortController()
+  const records = []
+  ctx.on('free-context/decision', async record => {
+    records.push(record)
+    await Promise.resolve()
+    controller.abort()
+  })
+  await ctx.plugin(plugin, { mode: 'apply', tools: ['fixture'], minInputBytes: 0 })
+  const output = await ctx.tools.execute({ ...exec(), signal: controller.signal })
+  assert.equal(records[0].outcome, 'selected')
+  assert.equal(output.isError, true)
+  assert.equal(JSON.stringify(output.content).includes('dsh-json-rows'), false)
+})
