@@ -1,0 +1,56 @@
+import { createHash } from 'node:crypto'
+
+function requireText(value, name) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new TypeError(`${name} must be a nonempty string`)
+  }
+  return value
+}
+
+/**
+ * Archive the exact original tool text through the host-owned spill backend.
+ * A failed or cancelled save must be handled by retaining original content.
+ * No receipt is returned after cancellation, even if storage already completed.
+ * @param {{saveText: Function}} store
+ * @param {object} exec
+ * @param {string} text
+ * @param {{maxBytes?: number}} [options]
+ */
+export async function archiveOriginal(store, exec, text, { maxBytes = 1024 * 1024 } = {}) {
+  const sessionId = requireText(exec?.agent?.session?.header?.id, 'sessionId')
+  const callId = requireText(exec?.callId, 'callId')
+  const toolName = requireText(exec?.name, 'toolName')
+  const signal = exec.signal
+  signal?.throwIfAborted()
+  if (typeof store?.saveText !== 'function') throw new TypeError('spillStore.saveText is required')
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new RangeError('Invalid maxBytes')
+  // Unpaired surrogates cannot be saved verbatim as UTF-8.
+  if (typeof text !== 'string' || !text.isWellFormed()) throw new TypeError('Expected well-formed text')
+  const bytes = Buffer.byteLength(text, 'utf8')
+  if (bytes > maxBytes) throw new RangeError('Original exceeds snapshot byte limit')
+  const sha256 = createHash('sha256').update(text, 'utf8').digest('hex')
+  const saved = await store.saveText({
+    owner: { sessionId },
+    source: { kind: 'tool', toolName, callId, label: 'result' },
+    suggestedName: 'free-context-original.txt',
+    content: text,
+  })
+  signal?.throwIfAborted()
+  exec.signal?.throwIfAborted()
+  if (exec.agent?.session?.header?.id !== sessionId || exec.callId !== callId || exec.name !== toolName) {
+    throw new Error('Tool execution identity changed during snapshot storage')
+  }
+  const locator = requireText(saved?.locator, 'locator')
+  const retrievalHint = requireText(saved?.retrievalHint, 'retrievalHint')
+  if (saved.bytes !== bytes) throw new Error('Snapshot byte count does not match original')
+  return Object.freeze({ sessionId, callId, toolName, sha256, bytes, locator, retrievalHint })
+}
+
+/** Render an opaque backend reference; never derive a filesystem path from it. */
+export function formatSnapshotReference(receipt) {
+  return [
+    `Original tool-result snapshot: ${JSON.stringify(receipt)}`,
+    'Use the backend retrievalHint to retrieve this exact snapshot. Use existing read/grep tools when supported by that backend; read all pages for full recovery. Do not substitute the current source file.',
+    'For full recovery, verify the UTF-8 byte count and SHA-256 of the complete retrieved text against this receipt. A partial read or grep match does not verify the full snapshot.',
+  ].join('\n')
+}

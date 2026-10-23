@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.js",
-    "./json": "./src/json-codec.js"
+    "./json": "./src/json-codec.js",
+    "./snapshot": "./src/snapshot.js"
   },
   "files": ["src", "README.md", "LICENSE"],
   "engines": { "node": ">=24" },

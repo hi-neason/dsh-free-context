@@ -86,6 +86,33 @@ if (candidate !== undefined) {
 
 独立编码器产生的候选可能比原文更长，获得候选不代表 token 节省；生产路由会计入完整 envelope 和内容块开销后执行字节数与估算 token 收益门槛。后续若加入格式说明或恢复引用，也须纳入候选总成本。当前固定查询测试只验证恢复数据的筛选、求和和嵌套查询一致性，尚未证明模型能直接使用紧凑格式完成同等质量的任务。
 
+## 原文快照
+
+需要有损转换时，可先通过宿主 `spillStore` 保存工具执行当时的完整原文：
+
+```js
+import { archiveOriginal, formatSnapshotReference } from 'dsh-free-context/snapshot'
+
+// exec 是当前工具执行上下文；originalText 是该次执行的完整原文。
+async function prepareSnapshot(ctx, exec, originalText) {
+  try {
+    const receipt = await archiveOriginal(ctx.spillStore, exec, originalText, {
+      maxBytes: 1048576,
+    })
+    return { receipt, reference: formatSnapshotReference(receipt) }
+  } catch {
+    // 未取得可用引用时，调用方必须保留原文，不能采用有损候选。
+    return undefined
+  }
+}
+```
+
+宿主必须加载 `spillStore` 后端，执行上下文必须具有 `agent.session.header.id`、`callId` 和工具 `name`。模块固定保存时的身份，返回冻结的 `sessionId`、`callId`、`toolName`、`sha256`、`bytes`、`locator` 和 `retrievalHint`。默认原文上限为 1 MiB UTF-8 字节；不成对的 Unicode surrogate 会被拒绝。存储失败、返回引用无效、字节数不符、执行身份变化或保存前后取消都会抛错。保存期间取消可能留下后端已写入的文件，但不会返回可采用的引用。
+
+`locator` 与 `retrievalHint` 原样来自后端，不由插件推导路径。`formatSnapshotReference` 提供精确引用与恢复说明：按后端指引使用现有 read/grep 能力，完整恢复时读取全部分页并核对 UTF-8 字节数与 SHA-256。局部读取或 grep 命中不代表全文校验，也不能用源文件当前内容代替快照。存储保留期限和访问权限由宿主后端管理；保存成功不保证引用永久有效。
+
+当前 JSON 路由使用可逆编解码，不调用该模块；有损日志策略后续接入时需在替换前取得快照引用。官方 `spill-local` 集成测试验证了完整文件回读的字节与哈希、源文件变化后的快照稳定性及存储失败；尚未验证真实模型恢复过程或官方 read 工具分页调用。
+
 ## 验证
 
 ```sh
