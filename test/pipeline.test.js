@@ -96,3 +96,16 @@ test('named function plugin registers only the prepended post-execute policy', a
   const decision = { kind: 'accept' }
   assert.equal(await handler(execution(), result(), async () => decision), decision)
 })
+
+test('final synchronous candidate guard runs after diagnostics and rejects stale or throwing guards', async () => {
+  for (const guardKind of ['stale', 'throws', 'async']) {
+    let current = true
+    const decision = { kind: 'accept' }
+    const handler = createPostExecuteHandler(() => ({ content: blocks('candidate'), strategy: 'fixture', validate: () => {
+      if (guardKind === 'throws') throw new Error('private guard details')
+      if (guardKind === 'async') return Promise.reject(new Error('private async guard'))
+      return current
+    } }), undefined, { mode: 'apply', report: async () => { await Promise.resolve(); current = false } })
+    assert.equal(await handler(execution(), result(), async () => decision), decision)
+  }
+})

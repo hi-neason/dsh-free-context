@@ -29,13 +29,14 @@ async function setup(t, behavior = {}) {
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  if (behavior.getQuery) ctx.provide('freeContextQuery', { getQuery: behavior.getQuery })
   if (!behavior.noStore) await ctx.plugin(SpillLocal, { root, cleanupPeriodDays: 0 })
   const calls = []
   class Adapter extends LlmAdapter {
     async * stream(request) {
       calls.push(request)
       if (behavior.cancel) behavior.cancel.abort()
-      const response = '{"selectedIds":["p1"]}'
+      const response = behavior.responseFor ? behavior.responseFor(request) : '{"selectedIds":["p1"]}'
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: response }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: response } }
@@ -105,4 +106,51 @@ test('official runtime missing usage and cancellation preserve safety boundaries
   assert.equal(aborted.isError, true)
   assert.equal(JSON.stringify(aborted.content).includes('LOSSY paragraph selection'), false)
   assert.equal(cancel.records[0].reason, 'aborted')
+})
+
+
+test('official runtime query provider updates A/B/A within one session without reloading the plugin', async t => {
+  let task = 'Question Alpha'
+  const { ctx, exec, calls, records } = await setup(t, {
+    getQuery: () => task,
+    responseFor: request => JSON.stringify({ selectedIds: [JSON.parse(request.messages[0].content[0].text.split('\n').at(-1)).currentTask === 'Question Alpha' ? 'p1' : 'p2'] }),
+  })
+  await ctx.plugin(Experiments, options({ selectionMode: 'query-dependent', maxQueryBytes: 100, maxCacheEntries: 2 }))
+  const alpha = await ctx.tools.execute(exec)
+  task = 'Question Beta'
+  const beta = await ctx.tools.execute(exec)
+  task = 'Question Alpha'
+  const again = await ctx.tools.execute(exec)
+  assert.ok(alpha.content[0].text.includes('Source paragraph p1;'))
+  assert.ok(beta.content[0].text.includes('Source paragraph p2;'))
+  assert.ok(again.content[0].text.includes('Source paragraph p1;'))
+  assert.equal(calls.length, 2)
+  assert.notEqual(records[0].queryHash, records[1].queryHash)
+  assert.equal(records[2].cacheHit, true)
+  assert.equal(records[2].estimatedCost, 0)
+  assert.deepEqual(beta.value, [{ type: 'text', text }])
+})
+
+test('official query mode handles missing service, missing usage and cancellation without applying', async t => {
+  for (const behavior of [{}, { getQuery: () => 'Question Alpha', noUsage: true }, { getQuery: () => 'Question Alpha', cancel: new AbortController() }]) {
+    const { ctx, exec, calls, records } = await setup(t, behavior)
+    await ctx.plugin(Experiments, options({ selectionMode: 'query-dependent', maxQueryBytes: 100 }))
+    const output = await ctx.tools.execute(exec)
+    if (!behavior.getQuery) {
+      assert.equal(calls.length, 0)
+      assert.equal(records[0].reason, 'query-unavailable')
+    } else if (behavior.noUsage) assert.equal(records[0].reason, 'missing-priced-usage')
+    else assert.equal(output.isError, true)
+    assert.equal(JSON.stringify(output.content).includes('LOSSY paragraph selection'), false)
+  }
+})
+
+test('official runtime rejects stale selection after asynchronous query-changing decision observers', async t => {
+  let task = 'Question Alpha'
+  const { ctx, exec, calls } = await setup(t, { getQuery: () => task })
+  ctx.on('free-context/decision', async () => { await Promise.resolve(); task = 'Question Beta' })
+  await ctx.plugin(Experiments, options({ selectionMode: 'query-dependent', maxQueryBytes: 100 }))
+  const output = await ctx.tools.execute(exec)
+  assert.deepEqual(output.content, [{ type: 'text', text }])
+  assert.equal(calls.length, 1)
 })

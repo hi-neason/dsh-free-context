@@ -216,7 +216,7 @@ ctx.on('free-context/retirement', record => console.log(record))
 ```js
 import * as Experiments from 'dsh-free-context/experiments'
 
-const experiment = await ctx.plugin(Experiments, {
+const experimentConfig = {
   mode: 'observe',
   tools: ['prose'], // 换为明确返回纯说明文本的实际工具；精确允许列表。
   provider: 'deepseek-official',
@@ -242,7 +242,8 @@ const experiment = await ctx.plugin(Experiments, {
   expectedRecoveryCost: 0,
   safetyMargin: 0.1,
   maxCallCost: 1,
-})
+}
+const experiment = await ctx.plugin(Experiments, experimentConfig)
 // await experiment.dispose()
 ```
 
@@ -257,6 +258,34 @@ const experiment = await ctx.plugin(Experiments, {
 `free-context/experiment` 事件只报告调用标识、模式、原因、用量、估算费用与缓存命中，不报告正文、工具参数或密钥。缓存按会话对象隔离，键包含完整原文哈希和模型/策略配置，每个会话最多保存 `maxCacheEntries` 项。命中时复用经过校验的选择，`originUsage` 表示原选择调用用量，`callUsage` 缺省且 `llmCalled: false` 表示本次没有新调用，不能再次计费。纯选择核心也可从 `dsh-free-context/text-selection` 导入 `createTextSelector`，但独立调用者需自行完成归档与经济门槛。
 
 已用官方 dsh runtime/provider 和 `deepseek-flash` 完成一次合成文本观察探针：实际输入 4,224 token、输出 9 token，保留保护段落；第二次命中缓存且无新模型调用，两次均保持原工具内容。该探针和 fake-adapter 集成测试验证了接口、归档、保护规则及失败边界，不是完整任务质量或账单收益证明；演示价格换算不等于供应商实收。
+
+## 当前任务相关的段落选择实验
+
+同一个实验插件可显式设置 `selectionMode: 'query-dependent'`，复用上述选择、归档、费用与失败保护流程。默认仍是 `task-independent`，不会读取任务。查询模式通过调用方提供的同步 `freeContextQuery.getQuery` 服务获取当前任务，不读取历史消息，也不会把工具参数或 `agent/pre-step` inbox 当作完整任务。
+
+```js
+// 延续上节 example 配置；不要同时保留同一实例的两种模式。
+await experiment.dispose()
+const currentTasks = new WeakMap()
+ctx.provide('freeContextQuery', {
+  getQuery: ({ session }) => currentTasks.get(session),
+})
+const queryExperiment = await ctx.plugin(Experiments, {
+  ...experimentConfig,
+  selectionMode: 'query-dependent',
+  maxQueryBytes: 4096,
+})
+// agent 是宿主的实际 Agent；应用在用户任务明确更新时维护此值。
+currentTasks.set(agent.session, '当前需要确认 Alpha 的保留期限和限制条件。')
+// 后续任务变化时更新，不需要重新加载插件。
+currentTasks.set(agent.session, '现在需要确认 Beta 的保留期限和限制条件。')
+```
+
+`maxQueryBytes` 是显式的 UTF-8 字节上限。缺少服务、空查询、Promise 返回值、超过预算或计算期间查询变化，都不会采用候选；最后一次同步校验在全部异步诊断订阅者完成后执行，查询服务实例替换也会使旧候选失效；调用后变化仍可能已产生辅助费用。纯核心可使用 `createTextSelector({ ...selectorOptions, selectionMode: 'query-dependent', maxQueryBytes })` 并在每次 `select` 中显式传 `query`，没有宿主服务依赖。
+
+缓存键包含完整查询哈希，因此同一原文的 A/B 任务分别计算，切回 A 时才可复用 A 的已验证选择；仍按 Session 对象隔离。审计 manifest 保存本次完整 prompt、查询哈希、原文哈希和范围，诊断事件只报告查询哈希而不报告查询正文。使用完整原始快照可重新选择：先按引用读取并校验原文，再以新任务调用选择器；不要把旧摘录当成完整来源，插件不会自动把已丢弃段落补回历史。
+
+查询相关性与证据覆盖仍是模型判断。任务改变会增加辅助调用并可能影响缓存收益，不能将单轮问答的选择效果外推为完整 Agent 任务收益。官方 runtime 的 A/B/A 集成测试覆盖不同选择与缓存隔离、缺少查询、缺 usage、取消和诊断订阅期间的任务变化。真实 `deepseek-flash` 合成探针中，A/B 分别选择原文 p1/p2（各输入 4,273、输出 9 token），切回 A 命中缓存；两类查询使用同一原文哈希、不同查询哈希，原文快照均校验通过。此探针不证明任意任务上的相关性或收益。
 
 ## 验证
 

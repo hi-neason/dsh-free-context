@@ -17,6 +17,15 @@ function callCost(usage, pricing) {
   return Number.isFinite(cost) ? cost : undefined
 }
 
+function readQuery(provider, exec) {
+  const value = provider.getQuery(Object.freeze({ session: exec.agent?.session, callId: exec.callId, toolName: exec.name }))
+  if (value && typeof value.then === 'function') {
+    Promise.resolve(value).catch(() => {})
+    return undefined
+  }
+  return value
+}
+
 /** Optional auxiliary model experiment. No Agent request or historical message mutation. */
 export function apply(ctx, input) {
   const config = parseExperimentConfig(input)
@@ -28,6 +37,8 @@ export function apply(ctx, input) {
     let selection
     let estimatedCost
     let callCostUpperEstimate
+    let query
+    let queryProvider
     try {
       if (content.length !== 1 || content[0].type !== 'text' || typeof content[0].text !== 'string') return undefined
       const original = measureContent(content)
@@ -47,19 +58,29 @@ export function apply(ctx, input) {
         expectedRecoveryCost: config.expectedRecoveryCost, safetyMargin: config.safetyMargin,
       })
       if (!economics(0, callCostUpperEstimate).adopt) { reason = 'no-predicted-benefit-before-call'; return undefined }
+      if (config.selectionMode === 'query-dependent') {
+        reason = 'query-unavailable'
+        queryProvider = ctx.get('freeContextQuery')
+        if (typeof queryProvider?.getQuery !== 'function') return undefined
+        query = readQuery(queryProvider, exec)
+        if (typeof query !== 'string' || !query.trim() || !query.isWellFormed()) { reason = 'missing-query'; return undefined }
+        if (Buffer.byteLength(query) > config.maxQueryBytes) { reason = 'query-byte-budget'; return undefined }
+      }
+      const queryIsCurrent = () => !queryProvider || (ctx.get('freeContextQuery') === queryProvider && readQuery(queryProvider, exec) === query)
       const store = ctx.get('spillStore')
       reason = 'snapshot-failed'
       const originalReceipt = await archiveOriginal(store, exec, content[0].text, { maxBytes: config.maxInputBytes })
       reason = 'selection-failed'
-      selection = await select({ kind: 'prose', text: content[0].text, session: exec.agent?.session, signal: exec.signal })
+      selection = await select({ kind: 'prose', text: content[0].text, session: exec.agent?.session, signal: exec.signal, query })
       estimatedCost = selection.cacheHit ? 0 : callCost(selection.callUsage, pricing)
+      if (!queryIsCurrent()) { reason = 'query-changed'; return undefined }
       if (selection.status !== 'selected') { reason = selection.reason; return undefined }
       if (!selection.usageComplete || estimatedCost === undefined || callCost(selection.originUsage, pricing) === undefined) { reason = 'missing-priced-usage'; return undefined }
       if (estimatedCost > config.maxCallCost) { reason = 'actual-call-cost-budget'; return undefined }
       reason = 'manifest-failed'
-      const manifest = JSON.stringify({ version: 1, policy: selection.strategy, sourceHash: selection.sourceHash,
+      const manifest = JSON.stringify({ version: 1, policy: selection.strategy, sourceHash: selection.sourceHash, queryHash: selection.queryHash,
         originalReceipt, selectedSpans: selection.spans.map(({ id, start, end }) => ({ id, start, end })),
-        budgets: { maxInputBytes: config.maxInputBytes, maxPromptBytes: config.maxPromptBytes, maxOutputBytes: config.maxOutputBytes, maxOutputTokens: config.maxOutputTokens, timeoutMs: config.timeoutMs },
+        budgets: { maxQueryBytes: config.maxQueryBytes, maxInputBytes: config.maxInputBytes, maxPromptBytes: config.maxPromptBytes, maxOutputBytes: config.maxOutputBytes, maxOutputTokens: config.maxOutputTokens, timeoutMs: config.timeoutMs },
         audit: selection.audit, cacheHit: selection.cacheHit, callUsage: selection.callUsage,
         originUsage: selection.originUsage, currency: pricing.currency, estimatedCost,
       })
@@ -70,17 +91,18 @@ export function apply(ctx, input) {
       const replacement = [{ ...content[0], text }]
       const output = measureContent(replacement)
       if (exec.signal?.aborted) { reason = 'aborted'; return undefined }
+      if (!queryIsCurrent()) { reason = 'query-changed'; return undefined }
       if (output.bytes >= original.bytes || output.estimatedTokens >= original.estimatedTokens || original.estimatedTokens - output.estimatedTokens < config.minSavingsTokens) { reason = 'insufficient-size-savings'; return undefined }
       if (!economics(output.estimatedTokens, estimatedCost).adopt) { reason = 'insufficient-net-benefit'; return undefined }
       reason = config.mode === 'apply' ? 'selected' : 'observed'
-      return { content: replacement, strategy: selection.strategy, lossy: true }
+      return { content: replacement, strategy: selection.strategy, lossy: true, validate: queryIsCurrent }
     } catch {
       if (exec.signal?.aborted) reason = 'aborted'
       return undefined
     } finally {
       await reportDecision(record => ctx.parallel('free-context/experiment', record), warn, {
         tool: exec.name, callId: exec.callId, sessionId: exec.agent?.session?.header?.id,
-        mode: config.mode, reason, cacheHit: selection?.cacheHit ?? false, llmCalled: selection?.llmCalled ?? false,
+        mode: config.mode, reason, queryHash: selection?.queryHash, cacheHit: selection?.cacheHit ?? false, llmCalled: selection?.llmCalled ?? false,
         callUsage: selection?.callUsage, estimatedCost, futureCacheReadPerMillion: config.futureCacheReadPerMillion, currency: config.pricing?.currency, callCostUpperEstimate,
       })
     }

@@ -177,3 +177,41 @@ test('reasoning stream bytes are bounded and contradictory usage is rejected', a
   const invalid = await createTextSelector(config(runtime(undefined, { usage: { ...usage, totalTokens: 999 } })))({ kind: 'prose', text: source })
   assert.equal(invalid.reason, 'invalid-usage')
 })
+
+test('query-dependent selection genuinely changes with A/B tasks and cache keys include the complete query', async () => {
+  const calls = []
+  const llm = { async * stream(request) {
+    const payload = JSON.parse(request.messages[0].content[0].text.split('\n').at(-1))
+    calls.push(payload.currentTask)
+    const response = JSON.stringify({ selectedIds: [payload.currentTask === 'Question Alpha' ? 'p1' : 'p2'] })
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: response }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: response } }
+    yield { type: 'usage', usage }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  } }
+  const select = createTextSelector({ ...config(llm), selectionMode: 'query-dependent', maxQueryBytes: 100, protectedTerms: [] })
+  const session = {}
+  const alpha = await select({ kind: 'prose', text: source, session, query: 'Question Alpha' })
+  const beta = await select({ kind: 'prose', text: source, session, query: 'Question Beta' })
+  const again = await select({ kind: 'prose', text: source, session, query: 'Question Alpha' })
+  assert.deepEqual(alpha.selectedIds, ['p1'])
+  assert.deepEqual(beta.selectedIds, ['p2'])
+  assert.equal(alpha.sourceHash, beta.sourceHash)
+  assert.notEqual(alpha.queryHash, beta.queryHash)
+  assert.equal(again.cacheHit, true)
+  assert.equal(again.callUsage, undefined)
+  assert.deepEqual(calls, ['Question Alpha', 'Question Beta'])
+  assert.equal(beta.strategy, 'query-dependent-prose-selection-v1')
+})
+
+test('query mode rejects absent/oversized queries before calling; independent mode never forwards an incidental query', async () => {
+  const llm = runtime()
+  const select = createTextSelector({ ...config(llm), selectionMode: 'query-dependent', maxQueryBytes: 5 })
+  for (const query of [undefined, '', 2, '\ud800']) assert.equal((await select({ kind: 'prose', text: source, query })).reason, 'missing-query')
+  assert.equal((await select({ kind: 'prose', text: source, query: '太长问题' })).reason, 'query-byte-budget')
+  assert.equal(llm.calls.length, 0)
+  await createTextSelector(config(llm))({ kind: 'prose', text: source, query: 'MUST_NOT_FORWARD' })
+  assert.equal(llm.calls[0].messages[0].content[0].text.includes('MUST_NOT_FORWARD'), false)
+  assert.throws(() => createTextSelector({ ...config(llm), selectionMode: 'query-dependent' }), /maxQueryBytes/)
+})

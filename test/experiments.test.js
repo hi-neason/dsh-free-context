@@ -24,12 +24,13 @@ function setup(overrides = {}, behavior = {}) {
   let handler
   const ctx = {
     on: (_event, callback) => { handler = callback }, logger: { warn() {} },
-    get: () => behavior.noStore ? undefined : store,
-    parallel: async (event, record) => { events.push({ event, record }) },
+    get: name => name === 'freeContextQuery' ? behavior.queryProvider : behavior.noStore ? undefined : store,
+    parallel: async (event, record) => { events.push({ event, record }); await behavior.onReport?.(event) },
     llm: { async * stream(request) {
       calls.push(request)
+      behavior.onRequest?.()
       if (behavior.cancel) behavior.cancel.abort()
-      const response = behavior.invalidResponse ? '{"selectedIds":[]}' : '{"selectedIds":["p1"]}'
+      const response = behavior.responseFor ? behavior.responseFor(request) : behavior.invalidResponse ? '{"selectedIds":[]}' : '{"selectedIds":["p1"]}'
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: response }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: response } }
@@ -160,4 +161,64 @@ test('future main-request cache price is required and independent from auxiliary
   await handler(execution(), result(), async () => ({ kind: 'accept' }))
   assert.equal(events[0].record.reason, 'selected')
   assert.equal(events[0].record.estimatedCost, 0.00011)
+})
+
+test('explicit query service supports A/B/A without plugin restart and never infers task from tool arguments', async () => {
+  let currentTask = 'Question Alpha'
+  const queryProvider = { getQuery: meta => {
+    assert.equal('arguments' in meta, false)
+    return currentTask
+  } }
+  const { handler, calls, events, saves } = setup({ selectionMode: 'query-dependent', maxQueryBytes: 100 }, {
+    queryProvider, responseFor: request => JSON.stringify({ selectedIds: [JSON.parse(request.messages[0].content[0].text.split('\n').at(-1)).currentTask === 'Question Alpha' ? 'p1' : 'p2'] }),
+  })
+  const exec = execution()
+  exec.arguments = { query: 'Wrong inferred question' }
+  const alpha = await handler(exec, result(), async () => ({ kind: 'accept' }))
+  currentTask = 'Question Beta'
+  const beta = await handler(exec, result(), async () => ({ kind: 'accept' }))
+  currentTask = 'Question Alpha'
+  await handler(exec, result(), async () => ({ kind: 'accept' }))
+  assert.ok(alpha.content[0].text.includes('Source paragraph p1;'))
+  assert.ok(beta.content[0].text.includes('Source paragraph p2;'))
+  assert.equal(calls.length, 2)
+  const reports = events.filter(item => item.event === 'free-context/experiment')
+  assert.notEqual(reports[0].record.queryHash, reports[1].record.queryHash)
+  assert.equal(reports[2].record.cacheHit, true)
+  assert.equal(JSON.stringify(reports).includes('Question Alpha'), false)
+  assert.notEqual(JSON.parse(saves[1].content).queryHash, JSON.parse(saves[3].content).queryHash)
+})
+
+test('missing/oversized/async queries prevent calls; changes during selection discard the stale candidate', async () => {
+  for (const queryProvider of [undefined, { getQuery: () => '' }, { getQuery: () => 'x'.repeat(101) }, { getQuery: async () => { throw new Error('private') } }]) {
+    const { handler, calls, saves } = setup({ selectionMode: 'query-dependent', maxQueryBytes: 100 }, { queryProvider })
+    const decision = { kind: 'accept' }
+    assert.equal(await handler(execution(), result(), async () => decision), decision)
+    assert.equal(calls.length, 0)
+    assert.equal(saves.length, 0)
+  }
+  let task = 'Question Alpha'
+  const { handler, events } = setup({ selectionMode: 'query-dependent', maxQueryBytes: 100 }, { queryProvider: { getQuery: () => task }, onRequest: () => { task = 'Question Beta' } })
+  const decision = { kind: 'accept' }
+  assert.equal(await handler(execution(), result(), async () => decision), decision)
+  assert.equal(events[0].record.reason, 'query-changed')
+  assert.ok(events[0].record.estimatedCost > 0)
+})
+
+test('query changes or service replacement during either awaited diagnostic cannot adopt a stale candidate', async () => {
+  for (const eventName of ['free-context/experiment', 'free-context/decision']) {
+    for (const replacement of [false, true]) {
+      let task = 'Question Alpha'
+      const behavior = { queryProvider: { getQuery: () => task }, onReport: async event => {
+        if (event !== eventName) return
+        await Promise.resolve()
+        if (replacement) behavior.queryProvider = { getQuery: () => 'Question Alpha' }
+        else task = 'Question Beta'
+      } }
+      const { handler, calls } = setup({ selectionMode: 'query-dependent', maxQueryBytes: 100 }, behavior)
+      const decision = { kind: 'accept' }
+      assert.equal(await handler(execution(), result(), async () => decision), decision)
+      assert.equal(calls.length, 1)
+    }
+  }
 })

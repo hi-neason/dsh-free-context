@@ -1,6 +1,6 @@
 const budgets = ['maxInputBytes', 'maxPromptBytes', 'maxOutputBytes', 'maxOutputTokens', 'maxArtifactBytes', 'timeoutMs', 'maxParagraphs']
 const amounts = ['maxCallCost', 'expectedRecoveryCost', 'safetyMargin', 'futureCacheReadPerMillion']
-const keys = ['mode', 'tools', 'provider', 'model', ...budgets, ...amounts, 'maxCacheEntries', 'protectedTerms', 'pricing', 'minimumFutureRequests', 'minSavingsTokens']
+const keys = ['selectionMode', 'maxQueryBytes', 'mode', 'tools', 'provider', 'model', ...budgets, ...amounts, 'maxCacheEntries', 'protectedTerms', 'pricing', 'minimumFutureRequests', 'minSavingsTokens']
 const priceKeys = ['currency', 'uncachedInputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion', 'outputPerMillion']
 function object(value, allowed, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError(`${label} must be an object`)
@@ -17,12 +17,13 @@ function strings(value, label) {
 
 export function parseExperimentConfig(input = {}) {
   object(input, keys, 'experiment config')
-  const config = { mode: 'off', tools: [], maxCacheEntries: 0, protectedTerms: [], minSavingsTokens: 32, ...input }
+  const config = { selectionMode: 'task-independent', mode: 'off', tools: [], maxCacheEntries: 0, protectedTerms: [], minSavingsTokens: 32, ...input }
+  if (!['task-independent', 'query-dependent'].includes(config.selectionMode)) throw new TypeError('Invalid selectionMode')
   if (!['off', 'observe', 'apply'].includes(config.mode)) throw new TypeError('Invalid mode')
   config.tools = strings(config.tools, 'tools')
   if (config.tools.some(tool => /\s/.test(tool))) throw new TypeError('Tool names must not contain whitespace')
   config.protectedTerms = strings(config.protectedTerms, 'protectedTerms')
-  for (const key of [...budgets, 'maxCacheEntries', 'minimumFutureRequests', 'minSavingsTokens']) if (config[key] !== undefined) number(config[key], key, true)
+  for (const key of [...budgets, 'maxQueryBytes', 'maxCacheEntries', 'minimumFutureRequests', 'minSavingsTokens']) if (config[key] !== undefined) number(config[key], key, true)
   for (const key of amounts) if (config[key] !== undefined) number(config[key], key)
   if (config.safetyMargin !== undefined && config.safetyMargin >= 1) throw new TypeError('safetyMargin must be less than 1')
   if (config.timeoutMs !== undefined && config.timeoutMs > 2147483647) throw new TypeError('timeoutMs exceeds timer range')
@@ -35,6 +36,7 @@ export function parseExperimentConfig(input = {}) {
   }
   if (config.mode !== 'off' && config.tools.length) {
     for (const key of budgets) if (!config[key]) throw new TypeError(`${key} must be explicitly positive`)
+    if (config.selectionMode === 'query-dependent' && !config.maxQueryBytes) throw new TypeError('maxQueryBytes must be explicitly positive')
     if (!config.provider || !config.model) throw new TypeError('Explicit provider and model are required')
   }
   return Object.freeze(config)
