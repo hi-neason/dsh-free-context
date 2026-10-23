@@ -18,7 +18,7 @@ const { createMessage, createToolResultMessage } = await load('@deepseek-ai/dsh-
 const { default: Projections } = await load('@deepseek-ai/dsh-session-projection')
 const { default: TokenMeter } = await load('@deepseek-ai/dsh-token-meter')
 const config = { enabled: true, tools: ['fixture'], minInputBytes: 100, retainRecentResults: 1,
-  minAgeSteps: 1, maxEntriesPerStep: 2, minimumFutureRequests: 100,
+  minAgeSteps: 1, minModelUses: 0, maxEntriesPerStep: 2, minimumFutureRequests: 100,
   pricing: { uncachedInputPerMillion: 1, cacheReadPerMillion: 1 }, expectedRecoveryCost: 0, safetyMargin: 0.1 }
 
 function appendResult(session, turn, callId, { error = false, name = 'fixture', text = 'original '.repeat(2000) } = {}) {
@@ -74,7 +74,7 @@ test('native events survive JSONL serialization, fresh Session restore and fork 
   const fork = Session.create('fork', buildForkSeed(restored.snapshotEvents(), restored.seq - 1))
   assert.deepEqual(fork.deriveMessages(), restored.deriveMessages())
   const revision = f.session.seq
-  assert.deepEqual(await retireHistory({ agent: f.agent }, config, f), [])
+  assert.equal((await retireHistory({ agent: f.agent }, config, f))[0].reason, 'retirement-cooldown')
   assert.equal(f.session.seq, revision)
   assert.doesNotThrow(() => f.tokenMeter.measure(restored))
   assert.equal(f.tokenMeter.measure(restored).totalTokens, f.tokenMeter.measure(f.session).totalTokens)
@@ -308,5 +308,70 @@ test('real outer waterfall content changes cannot authorize read retirement', as
       assert.equal(reports[0].reason, 'retired')
       assert.equal(f.session.surface.nodes.includes(old.seq), false)
     }
+  }
+})
+
+test('model exposure threshold counts committed responses rather than step starts and keeps excerpts', async t => {
+  const f = fixture(t)
+  f.session.append('step/start', { turn: 3, step: 1 })
+  const settings = { ...config, minModelUses: 2, excerptCharacters: 80 }
+  assert.equal((await retireHistory({ agent: f.agent }, settings, f))[0].reason, 'insufficient-model-uses')
+  assert.equal(f.stored.length, 0)
+  f.session.append('assistant/message', { turn: 3, step: 1, stream: [], message: createMessage({
+    role: 'assistant', content: [{ type: 'text', text: 'Observed earlier results.' }],
+    source: { kind: 'model', provider: 'fixture', model: 'fixture' },
+  }) }, { surfaceOp: 'append' })
+  assert.equal((await retireHistory({ agent: f.agent }, settings, f))[0].reason, 'retired')
+  const text = f.session.snapshotEvents().at(-1).data.message.content[0].text
+  assert.match(text, /"modelUses":2/)
+  assert.match(text, /Lossy head\/tail excerpt/)
+  assert.ok(text.includes('original original'))
+})
+
+test('explicit task boundaries are revalidated and durably consumed across restore', async t => {
+  const f = fixture(t)
+  const settings = { ...config, phasePolicy: 'boundary', minStepsBetweenRetirements: 0 }
+  assert.equal((await retireHistory({ agent: f.agent }, settings, f))[0].reason, 'missing-task-boundary')
+  let state = { phase: 'inspection', boundaryId: 'inspection-1', status: 'active' }
+  f.taskState = { getState: () => state }
+  assert.equal((await retireHistory({ agent: f.agent }, settings, f))[0].reason, 'missing-task-boundary')
+  state = { ...state, status: 'complete' }
+  const save = f.spillStore.saveText
+  f.spillStore.saveText = async input => { state = { ...state, status: 'active' }; return save(input) }
+  assert.equal((await retireHistory({ agent: f.agent }, settings, f))[0].reason, 'task-boundary-changed')
+  state = { ...state, status: 'complete' }
+  f.spillStore.saveText = save
+  assert.equal((await retireHistory({ agent: f.agent }, settings, f))[0].reason, 'retired')
+  f.agent.session = Session.create('phase-restored', JSON.parse(JSON.stringify(f.session.snapshotEvents())))
+  assert.equal((await retireHistory({ agent: f.agent }, settings, f))[0].reason, 'boundary-already-retired')
+})
+
+test('rewrite cooldown prevents repeated prefix changes until enough new steps', async t => {
+  const f = fixture(t)
+  appendResult(f.session, 3, 'third')
+  const settings = { ...config, minStepsBetweenRetirements: 2 }
+  assert.equal((await retireHistory({ agent: f.agent }, settings, f))[0].reason, 'retired')
+  assert.equal((await retireHistory({ agent: f.agent }, settings, f))[0].reason, 'retirement-cooldown')
+  f.session.append('turn/start', { turn: 4 })
+  f.session.append('step/start', { turn: 4, step: 1 })
+  assert.equal((await retireHistory({ agent: f.agent }, settings, f))[0].reason, 'retirement-cooldown')
+  f.session.append('step/end', { turn: 4, step: 1 })
+  f.session.append('step/start', { turn: 4, step: 2 })
+  assert.equal((await retireHistory({ agent: f.agent }, settings, f))[0].reason, 'retired')
+})
+
+test('ordinary tool success cannot hide shell failure, interruption, or diagnostic evidence', async t => {
+  for (const marker of ['[exit code: 1]', '[timed out after 100ms]', '[stopped: user]',
+    '[killed by signal: SIGTERM]', '[still running after 10ms; moved to background job 1]',
+    '[stderr]\nwarning details', '[sandbox: denied]', 'ERROR TS1234 at file.ts:50', 'not ok 20 - test']) {
+    const f = fixture(t)
+    f.session = Session.create('protected-shell')
+    f.agent.session = f.session
+    const old = appendResult(f.session, 1, 'shell', { name: 'bash', text: 'ordinary output '.repeat(2000) + '\n' + marker })
+    appendResult(f.session, 2, 'recent')
+    const reports = await retireHistory({ agent: f.agent }, { ...config, tools: ['bash'] }, f)
+    assert.equal(reports[0].reason, 'protected-status-evidence', marker)
+    assert.equal(f.stored.length, 0)
+    assert.ok(f.session.surface.nodes.includes(old.seq))
   }
 })
