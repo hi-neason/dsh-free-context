@@ -25,7 +25,7 @@ function setup(overrides = {}, behavior = {}) {
   const ctx = {
     on: (_event, callback) => { handler = callback }, logger: { warn() {} },
     get: name => name === 'freeContextQuery' ? behavior.queryProvider : behavior.noStore ? undefined : store,
-    parallel: async (event, record) => { events.push({ event, record }); await behavior.onReport?.(event) },
+    parallel: async (event, record) => { if (['free-context/experiment', 'free-context/decision'].includes(event)) events.push({ event, record }); await behavior.onReport?.(event) },
     llm: { async * stream(request) {
       calls.push(request)
       behavior.onRequest?.()
@@ -73,6 +73,10 @@ test('apply archives original and full auxiliary audit before returning a candid
   assert.ok(actual.content[0].text.includes('spill://fixture/2'))
   assert.ok(actual.content[0].text.includes('UTF-16'))
   assert.equal(calls.length, 1)
+  const associations = events.find(item => item.event === 'free-context/decision').record.snapshots
+  assert.equal(associations.length, 2)
+  assert.deepEqual(associations.map(ref => ref.purpose), ['original', 'audit'])
+  assert.equal(JSON.stringify(associations).includes('spill://'), false)
   const report = events.find(item => item.event === 'free-context/experiment').record
   assert.equal(report.reason, 'selected')
   assert.ok(Math.abs(report.estimatedCost - 0.000115) < 1e-12)

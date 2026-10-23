@@ -109,3 +109,16 @@ test('final synchronous candidate guard runs after diagnostics and rejects stale
     assert.equal(await handler(execution(), result(), async () => decision), decision)
   }
 })
+
+test('candidate snapshot diagnostics copy only validated frozen public references', async () => {
+  const reference = { referenceId: 'a'.repeat(64), sha256: 'b'.repeat(64), bytes: 5, sourceCallId: 'source', sessionId: 'session', purpose: 'original', locator: '/SECRET', arbitrary: 'SECRET' }
+  const reports = []
+  const handler = createPostExecuteHandler(() => ({content:blocks('short'),strategy:'fixture',snapshots:[reference,{...reference,sessionId:{private:'SECRET'}}]}), undefined,
+    {mode:'apply',report:record=>reports.push(record)})
+  await handler(execution(),result(),async()=>({kind:'accept'}))
+  assert.equal(reports[0].snapshots.length,1)
+  assert.equal(Object.isFrozen(reports[0].snapshots[0]),true)
+  assert.equal(JSON.stringify(reports).includes('SECRET'),false)
+  reference.sourceCallId='changed'
+  assert.equal(reports[0].snapshots[0].sourceCallId,'source')
+})

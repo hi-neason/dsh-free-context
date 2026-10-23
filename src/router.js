@@ -6,7 +6,7 @@ import { reduceNodeTap } from './log-reducer.js'
 import { archiveOriginal, formatSnapshotReference } from './snapshot.js'
 
 /** Route only supported single-text results. All budgets include content-block framing. */
-export function createContentRouter(config, { estimator, getStore = () => undefined } = {}) {
+export function createContentRouter(config, { estimator, getStore = () => undefined, onSnapshot = () => undefined } = {}) {
   return (content, exec) => {
     if (!Array.isArray(content) || content.length !== 1 || content[0]?.type !== 'text' ||
         typeof content[0].text !== 'string') return undefined
@@ -35,9 +35,11 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
     return (async () => {
       // Even observe mode archives before constructing an actual recoverable candidate.
       const receipt = await archiveOriginal(getStore(), exec, block.text, { maxBytes: config.maxInputBytes })
+      let snapshot
+      try { snapshot = onSnapshot(exec, receipt, 'original') } catch {}
       const replacement = [{ ...block, text: `${draft.text}\n\n${formatSnapshotReference(receipt)}` }]
       if (exec.signal?.aborted || !smaller(replacement)) return undefined
-      return { content: replacement, strategy: 'node-tap-v13', lossy: true }
+      return { content: replacement, strategy: 'node-tap-v13', lossy: true, snapshots: snapshot ? [snapshot] : [] }
     })()
   }
 }

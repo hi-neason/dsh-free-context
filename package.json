@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.js",
     "./json": "./src/json-codec.js",
+    "./snapshot-telemetry": "./src/snapshot-telemetry.js",
     "./snapshot": "./src/snapshot.js",
     "./read-lifecycle": "./src/read-lifecycle.js",
     "./economics": "./src/economics.js",

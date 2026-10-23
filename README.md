@@ -59,7 +59,7 @@ ctx.on('free-context/decision', record => {
 
 `observe` 会计算候选并报告 `observed`，保持原决策不变；`apply` 选择候选时报告 `selected`。这些结果只代表插件策略选择，不证明 Session 已写入、宿主已接受或已经产生计费收益；诊断期间取消时仍保留原决策。没有适用或达到门槛的候选时记录 `eligible/no-strategy`。失败、阻止决策、结构化值替换、取消和 PTC 内部调用报告跳过原因，不扫描其内容。`off`、空工具列表或全部策略关闭时不注册监听器，也不产生诊断。
 
-字节数按内容块 JSON 序列化后的 UTF-8 计算，包含块结构开销；默认 token 估算为 `ceil(bytes / 3)`，只是启发式估算，不是精确 tokenizer、媒体 token 计量、provider usage 或实际计费，也不是已节省 token。`elapsedMs` 不含下游工具策略和诊断订阅方耗时。日志候选正文包含原文快照引用；当前诊断事件不包含快照引用或回读记录。
+字节数按内容块 JSON 序列化后的 UTF-8 计算，包含块结构开销；默认 token 估算为 `ceil(bytes / 3)`，只是启发式估算，不是精确 tokenizer、媒体 token 计量、provider usage 或实际计费，也不是已节省 token。`elapsedMs` 不含下游工具策略和诊断订阅方耗时。日志候选正文包含原文快照引用；候选诊断通过受控标识关联快照与实际回读事件，详见下文快照诊断说明。
 
 事件使用 Cordis `parallel` 分发到普通 `ctx.on` 订阅，等待全部订阅完成，以隔离异步拒绝；监听器异常只产生固定警告，不改变工具结果。订阅方应快速完成，避免延迟工具结果返回。
 
@@ -81,7 +81,7 @@ if (candidate !== undefined) {
 }
 ```
 
-编码器将非空、各对象键及顺序完全一致的对象数组转换为版本化 JSON：`{ format: 'dsh-json-rows', version: 1, schema, rows }`。嵌套值保持 JSON 数据，解码返回规范 JSON 文本；原始缩进和字符串外空白不会恢复。两函数默认输入上限均为 1 MiB，按 UTF-8 字节计；解码候选超过默认上限时需显式传入足够的 `maxInputBytes`。
+编码器将非空、各对象键及顺序完全一致的对象数组转换为版本化 JSON：`{ format: 'dsh-json-rows', version: 1, schema, rows }`。嵌套值保持 JSON 数据，解码返回规范 JSON 文本；原始缩进和字符串外空白不会恢复。两函数默认输入上限均为 1 MiB，按 UTF-8 字节计。解码还具有独立的 `maxOutputBytes`（默认 1 MiB），在构造完整对象数组前核算 schema 展开体积；输入和输出超出默认预算时需分别明确设置上限。
 
 编码器采取保守准入：解析后去除字符串外空白的输入必须与重新序列化完全相同，并拒绝不安全整数、非有限数和负零。因此重复键、精度变化，以及部分合法但非规范的指数、转义形式会返回 `undefined`，调用方应保留原文。解码器严格校验格式版本、字段、schema 唯一性和行长度，非法输入会抛错；`__proto__` 等键作为普通自有数据属性恢复。
 
@@ -123,6 +123,15 @@ async function prepareSnapshot(ctx, exec, originalText) {
 `locator` 与 `retrievalHint` 原样来自后端，不由插件推导路径。`formatSnapshotReference` 提供精确引用与恢复说明：按后端指引使用现有 read/grep 能力，完整恢复时读取全部分页并核对 UTF-8 字节数与 SHA-256。局部读取或 grep 命中不代表全文校验，也不能用源文件当前内容代替快照。存储保留期限和访问权限由宿主后端管理；保存成功不保证引用永久有效。
 
 当前 JSON 路由使用可逆编解码，不调用该模块；有损日志路由已接入，替换前必须取得快照引用。官方 `spill-local` 集成测试验证了完整文件回读的字节与哈希、源文件变化后的快照稳定性及存储失败；下文真实 Agent TAP 任务另验证了模型通过官方 read 回读指定快照；尚未覆盖全部分页与大文件恢复情形。
+
+
+## 快照与回读诊断关联
+
+产生原文快照的主插件路径与独立实验会登记 `free-context/snapshot`；候选的 `free-context/decision.snapshots` 关联相同引用。事件仅含不透明 `referenceId`（locator 与 SHA-256 的哈希）、`sha256`、`bytes`、`sourceCallId`、`sessionId` 和 `purpose`（`original`、`audit`、`retirement`），不含 locator、恢复提示、原文或工具参数。归档记录不等于候选已采用。
+
+`free-context/recovery` 只观察同一 Session 对象中、`read.file_path` 精确等于已登记 locator 的现有 read 调用，报告 `recoveryCallId`、原引用及 `success/failed/blocked/modified/cancelled` 状态；成功且返回结构有效时附实际 `startLine/endLine/totalLines`。不推断别名，不重新读取源文件，也不提供额外恢复工具。所有事件均为 `verifiedFull: false`：返回全部行仍不能证明原始换行、字节数和哈希完全一致，更不能证明模型使用了这些内容。观察者异常不改变工具决策。
+
+`installSnapshotTracking(ctx, { maxEntriesPerSession: 128 })` 从 `dsh-free-context/snapshot-telemetry` 导出，返回 `record(exec, receipt, purpose)` 与 `dispose()`。登记表按 Session 对象弱引用隔离并限制条目数；淘汰或卸载只删除诊断元数据。恢复/fork 不自动重建表，宿主可用已知完整快照 receipt 在相应 Session 上显式重新登记。存储权限与保留期限仍由宿主负责。
 
 ## 文件读取生命周期
 
@@ -206,6 +215,18 @@ ctx.on('free-context/retirement', record => console.log(record))
 快照保存后，会重新检查 Session 修订号、当前表面、原消息和读取覆盖状态，任何并发变化或取消都拒绝该候选。正式退场保留原始事件，并同步相邻追加 dsh 内建 `compaction/prune` 影子计量与 `tool/result` 替换事件，保留消息身份、source 和工具调用配对；不注册额外必需事件解释器。真实 Session 测试验证 JSONL 事件序列恢复、fork，以及卸载插件后的消息派生一致性。再次运行不会重复退场已带引用的结果。
 
 这两个 append 沿用官方协议，并非数据库事务。插件诊断不会插入二者之间，但宿主的同步事件观察者仍会运行；一旦影子计量已提交，完成紧随的替换不会因观察者随后取消而中断。若第二次 append 失败，会检查真实日志和表面是否已经提交成功；确认部分提交时报告 `partial-commit`、输出固定警告，并抛出 `RETIREMENT_INCOMPLETE_PROTOCOL` 拒绝继续该模型步骤。后续发现未配对的影子计量同样报告 `incomplete-shadow-protocol` 并拒绝该步骤，需由宿主检查和恢复计量状态。不能将这种部分提交报告当作成功。
+
+退场默认还要求 `minModelUses: 2`、`minStepsBetweenRetirements: 1`，并保留 `excerptCharacters: 256` 的片段。曝光计数只接受已提交的 `assistant/message` 和有正 usage 证据的 `assistant/attempt`；单独 `step/start` 不是模型曝光或语义使用证据。冷却按上次退场后的新 `step/start` 计数。已识别的诊断、shell 失败/超时/信号/停止/后台/stderr 状态证据，即使 `isError: false` 也受保护。
+
+`phasePolicy` 默认为 `'any'`；选择 `'boundary'` 时由宿主明确提供同步状态：
+
+```js
+ctx.provide('freeContextTaskState', {
+  getState: ({ session }) => ({ phase: 'inspection', boundaryId: 'inspection-1', status: 'complete' }),
+})
+```
+
+未知、进行中或缺失状态拒绝退场，不解析 planner 文本。归档完成后重新校验状态；每个 `boundaryId` 的退场标记持久化，恢复后不重复执行该边界。真实快照回读测试覆盖恢复、fork 和卸载后的 read；已验证字节相等的测试限于 LF 样本，后端访问控制仍由宿主管理。
 
 底层 `resolveRetirementConfig`、`retireHistory` 和 `installRetirement` 也由 `dsh-free-context/retirement` 导出。历史退场是有损的模型上下文缩减，原日志与快照可恢复不等于模型任务语义无损；目前没有真实模型完整任务质量或净费用收益结论。
 
@@ -362,7 +383,7 @@ DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:agent -- \
 
 三组均使用真实官方 AgentLoop、SpillLocal、ToolFs 和 SpillPolicy：`baseline-default` 采用 base bundle 的 12500 inline token 上限；`baseline-tuned` 改为 1200；`plugin` 在 12500 上限上启用本插件 JSON/TAP 策略。这是明确声明的运行时组合，不包含完整 CLI profile 的所有插件，也未启用历史退场。离线 `evaluate` 中同名基线则仅调用官方 `pruneContent` 的默认/调优配置，不能等同完整 Agent 基线；离线字节除以三的估算不属于 provider 实耗。
 
-可选的价格 JSON 使用每百万 token 的 USD 单价，例如以下**有日期范围的历史快照**，重新运行前应核对当前模型、峰谷时段和假期规则：
+真实费用验收要求显式价格 JSON，使用每百万 token 的 USD 单价，例如以下**有日期范围的历史快照**，重新运行前应核对当前模型、峰谷时段和假期规则：
 
 ```json
 {
@@ -377,7 +398,7 @@ DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:agent -- \
 }
 ```
 
-费用按 dsh **互斥计数**计算：uncached input、cache read、output 分别乘价，不把缓存读重复计入未缓存输入。脚本不会自动判断价格时段；调用者须确保统一价格适用于整次运行。未提供价格、计数缺失或无效、存在未定价的 cache write 时，费用为 `null`。金额是根据 provider usage 的费用估算，不是账单扣款。`evaluate:live` 仅提供原文/插件文本的同 query 单轮问答辅助对照，不替代 AgentLoop 任务评测。
+费用按 dsh **互斥计数**计算：uncached input、cache read、output 分别乘价，不把缓存读重复计入未缓存输入。脚本不会自动判断价格时段；调用者须确保统一价格适用于整次运行。未提供价格、计数缺失或无效、存在未定价的 cache write 时，费用为 `null`，真实评测的整体完成验收不会通过；回放可单独验证控制流。金额是根据 provider usage 的费用估算，不是账单扣款。`evaluate:live` 仅提供原文/插件文本的同 query 单轮问答辅助对照，不替代 AgentLoop 任务评测。
 
 ### 2026-10-23 有限任务结果
 

@@ -15,12 +15,14 @@ export function createPostExecuteHandler(transform, warn = () => {}, options = {
     let output
     let strategy
     let lossy
+    let snapshots
     const finish = async (outcome, reason, returned = decision, validate) => {
       await reportDecision(report, warn, {
         tool: exec.name, callId: exec.callId,
         ...(exec.agent?.session?.header?.id !== undefined ? { sessionId: exec.agent.session.header.id } : {}),
         mode, outcome, reason,
         ...(strategy ? { strategy, lossy: lossy === true } : {}),
+        ...(snapshots?.length ? { snapshots } : {}),
         ...(input ? { input } : {}), ...(output ? { output } : {}),
         estimateKind: 'serialized-content-utf8-heuristic', elapsedMs: performance.now() - started,
       })
@@ -56,6 +58,17 @@ export function createPostExecuteHandler(transform, warn = () => {}, options = {
           (candidate.validate !== undefined && typeof candidate.validate !== 'function')) throw new TypeError('Invalid candidate')
       strategy = candidate.strategy
       lossy = candidate.lossy
+      // Copy only the public association fields; never forward a locator or arbitrary metadata.
+      if (Array.isArray(candidate.snapshots)) {
+        snapshots = candidate.snapshots.filter(ref => ref &&
+          /^[a-f0-9]{64}$/.test(ref.referenceId) && /^[a-f0-9]{64}$/.test(ref.sha256) &&
+          Number.isSafeInteger(ref.bytes) && ref.bytes >= 0 &&
+          typeof ref.sourceCallId === 'string' && ref.sourceCallId.length > 0 &&
+          typeof ref.sessionId === 'string' && ref.sessionId.length > 0 &&
+          ['original', 'audit', 'retirement'].includes(ref.purpose))
+          .map(({ referenceId, sha256, bytes, sourceCallId, sessionId, purpose }) =>
+            Object.freeze({ referenceId, sha256, bytes, sourceCallId, sessionId, purpose }))
+      }
       output = measureContent(candidate.content, estimator)
       return mode === 'apply'
         ? finish('selected', 'candidate', { ...decision, content: candidate.content }, candidate.validate)

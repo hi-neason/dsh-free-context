@@ -1,3 +1,4 @@
+import { installSnapshotTracking } from './snapshot-telemetry.js'
 import { parseExperimentConfig } from './experiment-config.js'
 export { Config } from './experiment-config.js'
 import { createTextSelector } from './text-selection.js'
@@ -30,6 +31,7 @@ function readQuery(provider, exec) {
 export function apply(ctx, input) {
   const config = parseExperimentConfig(input)
   if (config.mode === 'off' || !config.tools.length) return
+  const tracking = installSnapshotTracking(ctx)
   const select = createTextSelector({ ...config, llm: ctx.llm })
   const warn = message => ctx.logger.warn(message)
   const transform = async (content, exec) => {
@@ -70,6 +72,7 @@ export function apply(ctx, input) {
       const store = ctx.get('spillStore')
       reason = 'snapshot-failed'
       const originalReceipt = await archiveOriginal(store, exec, content[0].text, { maxBytes: config.maxInputBytes })
+      const originalReference = tracking.record(exec, originalReceipt, 'original')
       reason = 'selection-failed'
       selection = await select({ kind: config.selectionMode === 'diagnostic-evidence' ? 'diagnostic' : 'prose', text: content[0].text, session: exec.agent?.session, signal: exec.signal, query })
       estimatedCost = selection.cacheHit ? 0 : callCost(selection.callUsage, pricing)
@@ -85,6 +88,7 @@ export function apply(ctx, input) {
         originUsage: selection.originUsage, currency: pricing.currency, estimatedCost,
       })
       const manifestReceipt = await archiveOriginal(store, exec, manifest, { maxBytes: config.maxArtifactBytes })
+      const auditReference = tracking.record(exec, manifestReceipt, 'audit')
       const text = [`[LOSSY ${config.selectionMode === 'diagnostic-evidence' ? 'diagnostic evidence' : 'paragraph'} selection; policy ${selection.strategy}. Extracted source spans do not prove complete evidence.]`,
         selection.text, formatSnapshotReference(originalReceipt),
         'Auxiliary selection audit manifest (full request, response and usage):', formatSnapshotReference(manifestReceipt)].join('\n\n')
@@ -95,7 +99,7 @@ export function apply(ctx, input) {
       if (output.bytes >= original.bytes || output.estimatedTokens >= original.estimatedTokens || original.estimatedTokens - output.estimatedTokens < config.minSavingsTokens) { reason = 'insufficient-size-savings'; return undefined }
       if (!economics(output.estimatedTokens, estimatedCost).adopt) { reason = 'insufficient-net-benefit'; return undefined }
       reason = config.mode === 'apply' ? 'selected' : 'observed'
-      return { content: replacement, strategy: selection.strategy, lossy: true, validate: queryIsCurrent }
+      return { content: replacement, strategy: selection.strategy, lossy: true, validate: queryIsCurrent, snapshots: [originalReference, auditReference].filter(Boolean) }
     } catch {
       if (exec.signal?.aborted) reason = 'aborted'
       return undefined
