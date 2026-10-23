@@ -354,14 +354,18 @@ npm install --prefix /path/to/runtime \
   @deepseek-ai/dsh-spill-local@0.2.1-rc.2 \
   @deepseek-ai/dsh-spill-policy@0.2.1-rc.2 \
   @deepseek-ai/dsh-fs-local@0.2.1-rc.2 \
-  @deepseek-ai/dsh-tool-fs@0.2.1-rc.2
+  @deepseek-ai/dsh-tool-fs@0.2.1-rc.2 \
+  @deepseek-ai/dsh-ptc-runtime-node@0.2.1-rc.2 \
+  @deepseek-ai/dsh-subprocess-local@0.2.1-rc.2 \
+  @deepseek-ai/dsh-sandbox-local@0.2.1-rc.2 \
+  @deepseek-ai/dsh-sandbox-policy@0.2.1-rc.2
 ```
 
 ```sh
 DSH_RUNTIME_ROOT=/path/to/runtime npm run test:integration
 ```
 
-默认测试目录为 `.omx/integration-runtime`。已验证 Cordis `4.0.5`、Loader `1.0.6`、dsh `0.2.1-rc.2`：实际工具执行、策略组合顺序、结构化值保留、命名导出解析及卸载。已验证官方 Include/Loader YAML 组合，以及生产路由 baseline/observe/apply、下游内容与附加上下文保留、允许列表与收益门槛、PTC/失败/value 替换跳过及候选取消。未验证完整 dsh CLI/GUI 启动；有限的真实 Agent 任务评测见下节，不能外推到所有功能或工作负载。
+默认测试目录为 `.omx/integration-runtime`。已验证 Cordis `4.0.5`、Loader `1.0.6`、dsh `0.2.1-rc.2`：实际工具执行、策略组合顺序、结构化值保留、命名导出解析及卸载。已验证官方 Include/Loader YAML 组合，以及生产路由 baseline/observe/apply、下游内容与附加上下文保留、允许列表与收益门槛、PTC/失败/value 替换跳过及候选取消。另已通过真实 Node PTC 子进程与官方 `run_code` 桥接验证：内部结构化值和 dispatch 日志保持原样，仅最终模型可见 JSON 压缩；observe/apply 与卸载恢复均通过。未验证完整 dsh CLI/GUI 启动；有限的真实 Agent 任务评测见下节，不能外推到所有功能或工作负载。
 
 
 ## 可复现评测
