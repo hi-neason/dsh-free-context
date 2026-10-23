@@ -3,7 +3,10 @@
   "version": "0.1.0",
   "description": "Context efficiency plugin for DeepSeek Harness",
   "type": "module",
-  "exports": { ".": "./src/index.js" },
+  "exports": {
+    ".": "./src/index.js",
+    "./json": "./src/json-codec.js"
+  },
   "files": ["src", "README.md", "LICENSE"],
   "engines": { "node": ">=24" },
   "scripts": {

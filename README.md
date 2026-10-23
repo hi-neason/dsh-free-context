@@ -62,6 +62,30 @@ ctx.on('free-context/decision', record => {
 
 事件使用 Cordis `parallel` 分发到普通 `ctx.on` 订阅，等待全部订阅完成，以隔离异步拒绝；监听器异常只产生固定警告，不改变工具结果。订阅方应快速完成，避免延迟工具结果返回。
 
+## JSON 编解码候选
+
+纯 JSON 编解码器可独立调用，目前尚未接入插件生产路由：
+
+```js
+import { encodeJsonRows, decodeJsonRows } from 'dsh-free-context/json'
+
+const original = JSON.stringify([
+  { descriptive_identifier: 1, descriptive_status: 'ready' },
+  { descriptive_identifier: 2, descriptive_status: 'ready' },
+])
+const candidate = encodeJsonRows(original, { maxInputBytes: 1048576 })
+if (candidate !== undefined) {
+  const restored = decodeJsonRows(candidate)
+  console.log(JSON.parse(restored))
+}
+```
+
+编码器将非空、各对象键及顺序完全一致的对象数组转换为版本化 JSON：`{ format: 'dsh-json-rows', version: 1, schema, rows }`。嵌套值保持 JSON 数据，解码返回规范 JSON 文本；原始缩进和字符串外空白不会恢复。两函数默认输入上限均为 1 MiB，按 UTF-8 字节计；解码候选超过默认上限时需显式传入足够的 `maxInputBytes`。
+
+编码器采取保守准入：解析后去除字符串外空白的输入必须与重新序列化完全相同，并拒绝不安全整数、非有限数和负零。因此重复键、精度变化，以及部分合法但非规范的指数、转义形式会返回 `undefined`，调用方应保留原文。解码器严格校验格式版本、字段、schema 唯一性和行长度，非法输入会抛错；`__proto__` 等键作为普通自有数据属性恢复。
+
+候选可能比原文更长，获得候选不代表 token 节省。后续路由仍需计算包含格式说明与恢复引用的总成本。当前固定查询测试只验证恢复数据的筛选、求和和嵌套查询一致性，尚未证明模型能直接使用紧凑格式完成同等质量的任务。
+
 ## 验证
 
 ```sh
