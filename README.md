@@ -16,7 +16,7 @@ const fiber = await ctx.plugin(FreeContext)
 await fiber.dispose()
 ```
 
-插件通过 `tools/post-execute` 的前置监听器先等待 `next()`，再读取下游决策。仅处理模型可见内容，保留结构化 `value` 与附加上下文；阻止决策、结构化值替换、失败结果、取消和 PTC 内部调用直接通过。内部转换函数收到内容副本，失败保留既有决策。当前未注册历史改写或 PTC 日志转换。
+插件通过 `tools/post-execute` 的前置监听器先等待 `next()`，再读取下游决策。仅处理模型可见内容，保留结构化 `value` 与附加上下文；阻止决策、结构化值替换、失败结果、取消和 PTC 内部调用直接通过。内部转换函数收到内容副本，失败保留既有决策。历史退场默认关闭，需另行启用下述 `retirement`；不改写 PTC 内部调用日志。
 
 ## 配置与保护
 
@@ -41,8 +41,9 @@ const fiber = await ctx.plugin(FreeContext, {
 | `minSavingsTokens` | `32` | 候选策略要求的最小估算 token 节省量 |
 | `json.enabled` | `true` | JSON 策略开关 |
 | `logs.enabled` | `false` | 有损日志策略开关，默认关闭 |
+| `retirement.enabled` | `false` | 历史结果退场；具有独立工具允许列表和经济门槛，见下文 |
 
-所有数字必须为非负安全整数；未知键、错误类型和无效配置会在加载时明确报错，即使 `mode` 为 `off` 也要通过校验。配置经过复制和递归冻结，不受调用方后续修改影响。两种策略都关闭时不注册监听器。
+字节和 token 数必须为非负安全整数；未知键、错误类型和无效配置会在加载时明确报错，即使 `mode` 为 `off` 也要通过校验。配置经过复制和递归冻结，不受调用方后续修改影响。即时策略与历史退场全部关闭时不注册监听器。
 
 JSON 路由只接收单个纯文本内容块：通过工具允许列表与完整内容块体积检查后，编码适用的对象数组，解码并比较 JSON 数据，然后要求完整候选字节数和估算 token 均严格减少，且估算差值达到 `minSavingsTokens`。输入预算包含 JSON 转义与块元数据，正文单独低于上限不足以通过检查。已有编码 envelope、未知格式、非规范 JSON、多块或媒体内容保留原文。JSON 路由不丢弃字段；打开 `logs.enabled` 后可进一步匹配下文限定的 Node TAP 日志。
 
@@ -141,11 +142,11 @@ tracking.dispose() // 移除监听并丢弃优化元数据；所属 Cordis 上�
 
 `status` 可为 `active`、`superseded`、`stale` 或 `unknown`。版本变化和文件缺失观察会标记 `stale`；缺少版本、观察冲突等情况保守视为 `unknown`。查询不到记录也不能推断内容已过期。跟踪器仅保存本进程优化元数据：每个 Session 对象的读取记录和待完成观察分别最多保留配置条数，淘汰和卸载不影响历史内容；恢复会话或 fork 后不自动重建这些记录。
 
-此辅助接口不会自动加载到主插件，也不归档、删除或替换历史消息。调用方可用 `callId` 关联持久化原文引用；后续历史优化仍须写入受支持的 Session 决策。版本只反映宿主发出的观察，无法检测未发出事件的外部修改，不是文件锁或实时新鲜度保证。实际 fs-local/tool-fs 组合测试覆盖部分读取、完整读取、修改后的版本变化和字节上限导致的真实返回范围。
+该跟踪器不归档、删除或替换历史消息。主插件只在启用历史退场且其允许列表包含 `read` 时自动安装；其他调用方也可用 `callId` 关联持久化原文引用。版本只反映宿主发出的观察，无法检测未发出事件的外部修改，不是文件锁或实时新鲜度保证。实际 fs-local/tool-fs 组合测试覆盖部分读取、完整读取、修改后的版本变化和字节上限导致的真实返回范围。
 
 ## 缓存与净收益预测
 
-经济门槛作为独立纯函数提供，目前不会自动加载或控制主插件路由：
+经济门槛作为独立纯函数提供，同时用于下述可选历史退场；即时 JSON/TAP 路由仍使用其字节和 token 门槛：
 
 ```js
 import { assessNetBenefit } from 'dsh-free-context/economics'
@@ -171,6 +172,42 @@ console.log(decision.adopt, decision.reason, decision.conservativeNetBenefit)
 函数从预测毛节省中预留 `safetyMargin` 比例，再扣除全部增量成本，仅在剩余净收益严格大于零时建议采用。`breakEvenRequests` 是在同一假设下跨过保守门槛的最小整数请求数；无法给出安全有限阈值时为 `null`。无压缩、无未来请求或缓存读价为零均不采用。
 
 这些输出是基于调用方价格和未来请求假设的预测，不是账单证据，也不保证预测轮次一定发生。反复失效需要重新评估；模型质量、额外回合和真实缓存行为仍需完整任务对照验证。
+
+## 历史结果退场
+
+历史退场在 `agent/pre-step` 中运行，默认关闭。它有独立的工具允许列表，即使顶层 `tools: []` 也可单独使用：
+
+```js
+await ctx.plugin(FreeContext, {
+  mode: 'observe', // 确认诊断和任务质量后，可显式改为 apply。
+  retirement: {
+    enabled: true,
+    tools: ['read'],
+    retainRecentResults: 4,
+    minAgeSteps: 3,
+    minInputBytes: 8192,
+    minSavingsTokens: 32,
+    maxEntriesPerStep: 1,
+    maxSnapshotBytes: 1048576,
+    // 下列数字仅演示配置；必须换成实际价格和明确的未来请求/回读假设。
+    minimumFutureRequests: 20,
+    pricing: { uncachedInputPerMillion: 10, cacheReadPerMillion: 2 },
+    expectedRecoveryCost: 0.01,
+    safetyMargin: 0.25,
+  },
+})
+ctx.on('free-context/retirement', record => console.log(record))
+```
+
+上例的保留数量、年龄、大小和单步尝试上限也是默认值；`tools` 默认为空。价格、未来请求次数、回读费用和安全余量没有默认值，缺少时拒绝退场。宿主还必须提供 `spillStore` 和具有 `measure/estimateMessage` 能力的 `tokenMeter`；缺少计量器会报告 `missing-token-meter`。`off` 不安装监听；`observe` 会保存候选所需快照并计算完整引用成本，但不追加历史替换，`apply` 才执行退场。
+
+候选仅限允许工具的成功、单文本结果，保留最近 N 个工具结果及最近指定步数内的结果。`read` 还必须具有同版本完整覆盖的 `superseded` 记录，且覆盖它的新结果仍留在当前历史表面；`stale`、`unknown` 不代表可以删除。原文先成功保存，包含完整恢复指引的候选必须在字节和 token 上都变小，并达到最小节省量。经济门槛以宿主当前计量的全部保留上下文（含候选）保守计入一次缓存重建成本，扣除预期回读费用和安全余量；压缩本身不调用模型，模型压缩费用固定为零。计量与预测仍不是供应商账单或未来轮次保证。
+
+快照保存后，会重新检查 Session 修订号、当前表面、原消息和读取覆盖状态，任何并发变化或取消都拒绝该候选。正式退场保留原始事件，并同步相邻追加 dsh 内建 `compaction/prune` 影子计量与 `tool/result` 替换事件，保留消息身份、source 和工具调用配对；不注册额外必需事件解释器。真实 Session 测试验证 JSONL 事件序列恢复、fork，以及卸载插件后的消息派生一致性。再次运行不会重复退场已带引用的结果。
+
+这两个 append 沿用官方协议，并非数据库事务。插件诊断不会插入二者之间，但宿主的同步事件观察者仍会运行；一旦影子计量已提交，完成紧随的替换不会因观察者随后取消而中断。若第二次 append 失败，会检查真实日志和表面是否已经提交成功；确认部分提交时报告 `partial-commit`、输出固定警告，并抛出 `RETIREMENT_INCOMPLETE_PROTOCOL` 拒绝继续该模型步骤。后续发现未配对的影子计量同样报告 `incomplete-shadow-protocol` 并拒绝该步骤，需由宿主检查和恢复计量状态。不能将这种部分提交报告当作成功。
+
+底层 `resolveRetirementConfig`、`retireHistory` 和 `installRetirement` 也由 `dsh-free-context/retirement` 导出。历史退场是有损的模型上下文缩减，原日志与快照可恢复不等于模型任务语义无损；目前没有真实模型完整任务质量或净费用收益结论。
 
 ## 验证
 

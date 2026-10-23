@@ -1,4 +1,6 @@
-const keys = ['mode', 'tools', 'minInputBytes', 'maxInputBytes', 'minSavingsTokens', 'json', 'logs']
+import { resolveRetirementConfig } from './retirement.js'
+
+const keys = ['mode', 'tools', 'minInputBytes', 'maxInputBytes', 'minSavingsTokens', 'json', 'logs', 'retirement']
 
 function object(value, allowed, path) {
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
@@ -46,6 +48,7 @@ export function parseConfig(input = {}) {
     mode, tools: Object.freeze([...tools]), minInputBytes, maxInputBytes,
     minSavingsTokens: integer(input, 'minSavingsTokens', 32),
     json: strategy(input, 'json', true), logs: strategy(input, 'logs', false),
+    retirement: resolveRetirementConfig(Object.hasOwn(input, 'retirement') ? input.retirement : {}),
   })
 }
 
