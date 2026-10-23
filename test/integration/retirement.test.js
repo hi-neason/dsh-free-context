@@ -1,10 +1,13 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { retireHistory, installRetirement } from '../../src/retirement.js'
-import { createReadTracker } from '../../src/read-lifecycle.js'
+import { createReadTracker, installReadTracking } from '../../src/read-lifecycle.js'
 import * as Plugin from '../../src/index.js'
 
 const requireRuntime = createRequire(resolve(process.env.DSH_RUNTIME_ROOT ?? '.omx/integration-runtime', 'package.json'))
@@ -201,7 +204,7 @@ test('read retirement requires retained same-version coverage and rechecks it af
     for (const callId of ['old-read', 'new-read']) {
       const exec = { agent: f.agent, name: 'read', callId }
       tracker.observe(target, { kind: 'present', version: 'v1' }, exec)
-      tracker.settle(exec, { value: { path: 'file', offset: 1, lines: [{ number: 1, text: 'same' }], totalLines: 1 } })
+      tracker.settle(exec, { content: [{ type: 'text', text: 'original '.repeat(2000) }], value: { path: 'file', offset: 1, lines: [{ number: 1, text: 'same' }], totalLines: 1 } })
     }
     const save = f.spillStore.saveText
     f.spillStore.saveText = async input => {
@@ -241,7 +244,7 @@ test('a native replacement of the covering read cannot justify retiring the olde
   for (const callId of ['old-read', 'new-read']) {
     const exec = { agent: f.agent, name: 'read', callId }
     tracker.observe({ targetKey: 'opaque:file' }, { kind: 'present', version: 'v1' }, exec)
-    tracker.settle(exec, { value: { path: 'file', offset: 1,
+    tracker.settle(exec, { content: [{ type: 'text', text: 'original '.repeat(2000) }], value: { path: 'file', offset: 1,
       lines: [{ number: 1, text: 'same' }], totalLines: 1 } })
   }
   // Reproduce the official pruner's native two-event protocol. The newer
@@ -258,4 +261,52 @@ test('a native replacement of the covering read cannot justify retiring the olde
   assert.equal(f.session.seq, revision)
   assert.equal(f.stored.length, 0)
   assert.ok(f.session.surface.nodes.includes(old.seq))
+})
+
+
+test('real outer waterfall content changes cannot authorize read retirement', async t => {
+  const { default: SystemPrompt } = await load('@deepseek-ai/dsh-system-prompt')
+  const { default: Tools } = await load('@deepseek-ai/dsh-tools')
+  const { default: LocalFs } = await load('@deepseek-ai/dsh-fs-local')
+  const ToolFs = await load('@deepseek-ai/dsh-tool-fs')
+  const { provideWorkingDirectoryFixture } = await load('@deepseek-ai/dsh-agent-loop-testkit')
+  for (const changed of [false, true]) {
+    const f = fixture(t)
+    const directory = await mkdtemp(join(tmpdir(), 'free-context-retirement-waterfall-'))
+    t.after(() => rm(directory, { recursive: true, force: true }))
+    provideWorkingDirectoryFixture(f.ctx, directory)
+    await f.ctx.plugin(SystemPrompt)
+    await f.ctx.plugin(Tools)
+    await f.ctx.plugin(LocalFs, { cwd: directory })
+    await f.ctx.plugin(ToolFs, { readMaxLineLength: 30000 })
+    await writeFile(join(directory, 'file.txt'), 'critical evidence '.repeat(1000) + '\nextra')
+    f.session = Session.create(`waterfall-${changed}`)
+    f.agent.session = f.session
+    const tracker = installReadTracking(f.ctx)
+    const read = (callId, limit) => f.ctx.tools.execute({ name: 'read', callId,
+      arguments: { file_path: 'file.txt', offset: 1, limit }, agent: f.agent, signal: new AbortController().signal })
+    const oldResult = await read('old-read', 1)
+    assert.equal(oldResult.isError, false)
+    const old = appendResult(f.session, 1, 'old-read', { name: 'read', text: oldResult.content[0].text })
+    // Registered later with prepend: it resumes AFTER tracking has settled.
+    f.ctx.on('tools/post-execute', async (_exec, result, next) => ({ ...await next(),
+      content: changed ? [{ type: 'text', text: 'trimmed' }] : result.content,
+    }), { prepend: true })
+    const newResult = await read('new-read', 2)
+    assert.equal(newResult.isError, false)
+    appendResult(f.session, 2, 'new-read', { name: 'read', text: newResult.content[0].text })
+    assert.equal(tracker.query(f.session, 'old-read').status, 'superseded')
+    assert.equal(tracker.query(f.session, 'old-read').supersededBy, 'new-read')
+    const revision = f.session.seq
+    const reports = await retireHistory({ agent: f.agent }, { ...config, tools: ['read'] }, { ...f, readTracking: tracker })
+    if (changed) {
+      assert.deepEqual(reports, [])
+      assert.equal(f.session.seq, revision)
+      assert.equal(f.stored.length, 0)
+      assert.ok(f.session.surface.nodes.includes(old.seq))
+    } else {
+      assert.equal(reports[0].reason, 'retired')
+      assert.equal(f.session.surface.nodes.includes(old.seq), false)
+    }
+  }
 })

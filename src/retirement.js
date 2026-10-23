@@ -1,5 +1,6 @@
 import { archiveOriginal, formatSnapshotReference } from './snapshot.js'
 import { assessNetBenefit } from './economics.js'
+import { hashReadContent } from './read-lifecycle.js'
 
 const MARKER = '[dsh-free-context retired v1]\n'
 const defaults = { enabled: false, tools: [], minInputBytes: 8192, minSavingsTokens: 32,
@@ -52,7 +53,8 @@ function eligibleRead(tracking, session, callId) {
     // so a replaced surface node cannot serve as full-coverage evidence.
     if (event.surfaceOp !== 'append' || event.sourceEventSeqs?.length) return false
     const message = session.deriveEventMessage(event)
-    return message.source?.callId === newer.callId && !message.isError &&
+    return message.source?.callId === newer.callId && !message.isError && newer.contentHash &&
+      hashReadContent(message.content) === newer.contentHash &&
       !message.content?.some(block => block.type === 'text' && block.text.startsWith(MARKER))
   })
   if (!retained) return undefined

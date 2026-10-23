@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createReadTracker, installReadTracking } from 'dsh-free-context/read-lifecycle'
+import { createReadTracker, installReadTracking, hashReadContent } from 'dsh-free-context/read-lifecycle'
 
 const target = { targetKey: 'opaque:target', displayPath: 'shown.txt' }
 const execution = (session, callId) => ({ agent: { session }, name: 'read', callId, arguments: { limit: 9999 } })
@@ -22,7 +22,7 @@ test('only actual same-version line coverage supersedes; query is frozen and sco
   assert.equal(tracker.query(session, 'a').status, 'active')
   read(tracker, session, 'c', 1, ['one', 'two'])
   assert.deepEqual(tracker.query(session, 'a'), { callId: 'a', targetKey: target.targetKey, version: 'v1',
-    start: 2, end: 2, status: 'superseded', supersededBy: 'c' })
+    start: 2, end: 2, status: 'superseded', supersededBy: 'c', contentHash: hashReadContent(result(2, ['two']).content) })
   assert.equal(tracker.query(session, 'c').end, 2)
   assert.equal(Object.isFrozen(tracker.query(session, 'a')), true)
 })
@@ -35,6 +35,19 @@ test('different versions and absence mark stale without removing records', () =>
   assert.equal(tracker.query(session, 'a').status, 'stale')
   tracker.observe(target, { kind: 'absent' }, { agent: { session }, name: 'edit', callId: 'edit' })
   assert.equal(tracker.query(session, 'b').status, 'stale')
+})
+
+test('coverage without hashable model-visible content cannot supersede an older read', () => {
+  const tracker = createReadTracker()
+  const session = {}
+  read(tracker, session, 'old', 1, ['one'])
+  const exec = execution(session, 'new')
+  tracker.observe(target, { kind: 'present', version: 'v1' }, exec)
+  const output = result(1, ['one', 'two'])
+  delete output.content
+  tracker.settle(exec, output)
+  assert.equal(tracker.query(session, 'old').status, 'active')
+  assert.equal(tracker.query(session, 'new'), undefined)
 })
 
 test('version changes during pending read, unknown observations and repeated ids cannot supersede', () => {

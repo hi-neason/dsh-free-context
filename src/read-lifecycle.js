@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto'
 
 const nonempty = value => typeof value === 'string' && value.length > 0
+
+/** Bind coverage evidence to the complete model-visible content, not just line ranges. */
+export function hashReadContent(content) {
+  if (!Array.isArray(content)) return undefined
+  try { return createHash('sha256').update(JSON.stringify(content)).digest('hex') } catch { return undefined }
+}
 const owner = exec => {
   const session = exec?.agent?.session
   return session !== null && typeof session === 'object' ? session : undefined
@@ -66,7 +72,8 @@ export function createReadTracker({ maxEntriesPerSession = 256 } = {}) {
     if (result?.isError || exec.signal?.aborted || exec.parent !== undefined || decision.kind !== 'accept' ||
       Object.hasOwn(decision, 'value') || Object.hasOwn(decision, 'content')) return
     const window = range(result?.value)
-    if (!window) return
+    const contentHash = hashReadContent(result?.content)
+    if (!window || !contentHash) return
     // Duplicate ids cannot establish which execution the observation belongs to.
     if (data.records.has(exec.callId)) {
       data.records.get(exec.callId).status = 'unknown'
@@ -75,7 +82,7 @@ export function createReadTracker({ maxEntriesPerSession = 256 } = {}) {
     }
     const current = { callId: exec.callId, targetKey: observed?.targetKey, version: observed?.version,
       start: window.start, end: window.end, status: observed && !observed.conflict ? 'active' : 'unknown',
-      hashes: window.hashes }
+      hashes: window.hashes, contentHash }
     if (current.status === 'active' && current.end >= current.start) {
       for (const previous of data.records.values()) {
         if (previous.status !== 'active' || previous.targetKey !== current.targetKey || previous.version !== current.version ||
