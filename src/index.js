@@ -11,7 +11,7 @@ export function apply(ctx, input) {
   const config = parseConfig(input)
   if (config.mode === 'off' || config.tools.length === 0 || (!config.json.enabled && !config.logs.enabled)) return
   ctx.on('tools/post-execute', createPostExecuteHandler(
-    createContentRouter(config),
+    createContentRouter(config, { getStore: () => ctx.get('spillStore') }),
     message => ctx.logger.warn(message),
     {
       mode: config.mode,

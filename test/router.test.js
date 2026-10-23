@@ -50,3 +50,54 @@ test('does not route disabled, unlisted, unknown, multiple or noncanonical conte
     assert.equal(createContentRouter(config())(blocks, exec), undefined)
   }
 })
+
+function successfulTap(count = 100) {
+  return ['TAP version 13', ...Array.from({ length: count }, (_, i) => `# Subtest: test ${i + 1}\nok ${i + 1} - test ${i + 1}\n  ---\n  duration_ms: 1.5\n  type: 'test'\n  ...`), `1..${count}`, `# tests ${count}`, '# suites 0', `# pass ${count}`, '# fail 0', '# cancelled 0', '# skipped 0', '# todo 0', '# duration_ms 10.5', ''].join('\n')
+}
+const logExec = () => ({ name: 'fixture', callId: 'call-log', agent: { session: { header: { id: 'session-log' } } }, signal: new AbortController().signal })
+const logBlocks = () => [{ type: 'text', text: successfulTap() }]
+const logConfig = overrides => config({ logs: { enabled: true }, ...overrides })
+const store = saves => ({ saveText: async input => {
+  saves.push(input)
+  return { locator: 'spill://fixture/log', bytes: Buffer.byteLength(input.content), retrievalHint: 'Read exact snapshot.' }
+} })
+
+test('TAP route saves exact original before applying a lossy candidate including real receipt cost', async () => {
+  const saves = []
+  const original = logBlocks()
+  const route = createContentRouter(logConfig(), { getStore: () => store(saves) })
+  const candidate = await route(original, logExec())
+  assert.equal(candidate.strategy, 'node-tap-v13')
+  assert.equal(candidate.lossy, true)
+  assert.equal(saves[0].content, original[0].text)
+  assert.equal(saves[0].owner.sessionId, 'session-log')
+  assert.ok(candidate.content[0].text.includes('spill://fixture/log'))
+  assert.ok(candidate.content[0].text.includes('sha256'))
+  assert.ok(measureContent(candidate.content).bytes < measureContent(original).bytes)
+})
+
+test('log route requires storage and ownership; aborted or failed archives yield no candidate', async () => {
+  const original = logBlocks()
+  await assert.rejects(createContentRouter(logConfig())(original, logExec()), /spillStore/)
+  await assert.rejects(createContentRouter(logConfig(), { getStore: () => store([]) })(original, exec), /sessionId/)
+  await assert.rejects(createContentRouter(logConfig(), { getStore: () => ({ saveText: async () => { throw new Error('storage failed') } }) })(original, logExec()), /storage failed/)
+  const controller = new AbortController()
+  const storage = store([])
+  const route = createContentRouter(logConfig(), { getStore: () => ({ saveText: async input => {
+    const receipt = await storage.saveText(input)
+    controller.abort()
+    return receipt
+  } }) })
+  await assert.rejects(route(original, { ...logExec(), signal: controller.signal }), { name: 'AbortError' })
+})
+
+test('observe mode archives and complete receipt can disqualify apparent savings', async () => {
+  const saves = []
+  const route = createContentRouter(logConfig({ mode: 'observe' }), { getStore: () => store(saves) })
+  assert.ok(await route(logBlocks(), logExec()))
+  assert.equal(saves.length, 1)
+  const oversizedReceipt = { saveText: async input => ({ locator: 'spill://fixture/log', bytes: Buffer.byteLength(input.content), retrievalHint: 'x'.repeat(20000) }) }
+  assert.equal(await createContentRouter(logConfig(), { getStore: () => oversizedReceipt })(logBlocks(), logExec()), undefined)
+  assert.equal(await createContentRouter(logConfig({ minSavingsTokens: 1000000 }), { getStore: () => assert.fail('do not save hopeless candidate') })(logBlocks(), logExec()), undefined)
+  assert.equal(createContentRouter(config(), { getStore: () => assert.fail('logs are disabled') })(logBlocks(), logExec()), undefined)
+})
