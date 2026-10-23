@@ -64,3 +64,36 @@ test('missing usage, wrong answers, and timeout remain distinct from successful 
   })) })
   assert.equal(incomplete.completed, false)
 })
+
+test('live QA rejects contradictory or incomplete accounting and truncated correct answers', async () => {
+  const fixtures = await loadFixtures()
+  const valid = { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
+    prompt_cache_hit_tokens: 30, prompt_cache_miss_tokens: 70 }
+  const cases = [
+    { usage: { ...valid, total_tokens: 121 } },
+    { usage: { ...valid, prompt_cache_miss_tokens: 71 } },
+    { usage: { ...valid, prompt_cache_hit_tokens: -1 } },
+    { usage: { ...valid, prompt_cache_hit_tokens: 30.5 } },
+    { usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } },
+    { usage: { ...valid, prompt_tokens: Number.MAX_SAFE_INTEGER, completion_tokens: 1,
+      total_tokens: Number.MAX_SAFE_INTEGER, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: Number.MAX_SAFE_INTEGER } },
+    { usage: valid, finishReason: 'length' },
+    { usage: valid, finishReason: 'tool_calls' },
+  ]
+  for (const scenario of cases) {
+    const report = await evaluateLive({ key: 'test-only', fetchImpl: async (_url, options) => {
+      const prompt = JSON.parse(options.body).messages[0].content
+      const fixture = fixtures.find(item => prompt.startsWith(item.query))
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(fixture.expected) },
+        finish_reason: scenario.finishReason ?? 'stop' }], usage: scenario.usage }))
+    } })
+    assert.equal(report.completed, false)
+    const group = report.tasks[0].groups.original
+    assert.equal(group.exactFacts, true)
+    assert.equal(group.usage.completion_tokens, scenario.usage.completion_tokens, 'known counts remain visible')
+    if (scenario.finishReason) {
+      assert.equal(group.responseComplete, false)
+      assert.equal(group.passed, false)
+    } else assert.equal(group.usageComplete, false)
+  }
+})

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { evaluateAgent, priceUsage, summarizeUsage } from '../../scripts/evaluate-agent.js'
+import { agentCompletion, evaluateAgent, priceUsage, summarizeUsage } from '../../scripts/evaluate-agent.js'
 
 test('real AgentLoop composes three policies and recovers exact facts through official tools', async () => {
   const report = await evaluateAgent({ replay: true })
@@ -40,4 +40,22 @@ test('price estimates charge disjoint cache and uncached counts only with explic
   assert.equal(priceUsage(usage), null)
   assert.equal(priceUsage(usage, { currency: 'USD', uncached: .3, cacheRead: .006, output: 1.2, sourceUrl: 'https://api-docs.deepseek.com/quick_start/pricing/' }), 1.506)
   assert.equal(priceUsage({ ...usage, cacheWriteTokens: 1 }, { currency: 'USD', uncached: .3, cacheRead: .006, output: 1.2, sourceUrl: 'source' }), null)
+})
+
+test('real cost completion requires explicit valid prices and complete cost coverage; replay does not', () => {
+  const usage = { inputTokens: 100, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 0 }
+  const unpriced = { passed: true, usageComplete: true, usage, pricing: null, estimatedCostUSD: null }
+  assert.deepEqual(agentCompletion([unpriced]), {
+    qualityComplete: true, usageComplete: true, costComplete: false, completed: false,
+  })
+  assert.equal(agentCompletion([unpriced], { replay: true }).completed, true)
+  const pricing = { currency: 'USD', uncached: .3, cacheRead: .006, output: 1.2, sourceUrl: 'https://api-docs.deepseek.com/quick_start/pricing/' }
+  const priced = { ...unpriced, pricing, estimatedCostUSD: priceUsage(usage, pricing) }
+  assert.equal(agentCompletion([priced]).completed, true)
+  assert.equal(agentCompletion([priced, unpriced]).completed, false)
+  assert.equal(agentCompletion([{ ...priced, usageComplete: false }]).completed, false)
+  assert.equal(agentCompletion([{ ...priced, passed: false }]).completed, false)
+  assert.equal(agentCompletion([{ ...priced, estimatedCostUSD: null }]).completed, false)
+  assert.equal(agentCompletion([{ ...priced, usage: { ...usage, cacheWriteTokens: 1 }, estimatedCostUSD: null }]).completed, false)
+  assert.equal(agentCompletion([]).completed, false)
 })

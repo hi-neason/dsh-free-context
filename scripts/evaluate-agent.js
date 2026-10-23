@@ -174,12 +174,24 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
   }
 }
 
+/** Quality alone cannot complete a live cost comparison. Replay has no monetary claim. */
+export function agentCompletion(tasks, { replay = false } = {}) {
+  const qualityComplete = tasks.length > 0 && tasks.every(task => task.passed)
+  const usageComplete = tasks.length > 0 && tasks.every(task => task.usageComplete)
+  const costComplete = !replay && usageComplete && tasks.every(task => {
+    const price = priceUsage(task.usage, task.pricing)
+    return price !== null && task.estimatedCostUSD === price
+  })
+  return { qualityComplete, usageComplete, costComplete,
+    completed: qualityComplete && usageComplete && (replay || costComplete) }
+}
+
 export async function evaluateAgent(options = {}) {
   const tasks = []
   for (const fixture of await agentFixtures()) for (const group of groups) tasks.push(await runAgentFixture(fixture, group, options))
   return { evaluationKind: options.replay ? 'real-agent-loop-scripted-provider' : 'real-agent-loop-live-provider',
     model: options.model ?? 'deepseek-flash', criteria, groupOrder: groups,
-    completed: tasks.every(task => task.passed && task.usageComplete),
+    ...agentCompletion(tasks, options),
     limitations: ['Bounded fixed fixture tasks, not general coding workload evidence.', 'Baselines load real spill policy at base-bundle 12500 or tuned 1200; unrelated full CLI profile plugins are not loaded.', 'Fixed group order and shared provider cache confound comparisons; this is not a randomized repeated benchmark.', 'Price estimates apply caller-supplied uniform rates to the whole run; verify date, model, peak/off-peak and holiday regime. No automatic rate selection or billed-charge claim.', 'Incomplete usage exposes only known counts and yields null cost, not zero cost.'], tasks }
 }
 

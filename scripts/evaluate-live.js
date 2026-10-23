@@ -24,8 +24,15 @@ export async function queryModel({ key, model, query, text, expected, fetchImpl 
     try { actual = JSON.parse(answer) } catch { actual = null }
     const usage = Object.fromEntries(usageFields.filter(field => Number.isSafeInteger(data.usage?.[field]) && data.usage[field] >= 0)
       .map(field => [field, data.usage[field]]))
-    return { status: 'success', actual, passed: isDeepStrictEqual(actual, expected), usage,
-      usageComplete: usageFields.slice(0, 3).every(field => Object.hasOwn(usage, field)),
+    const usageComplete = usageFields.every(field => Object.hasOwn(usage, field)) &&
+      Number.isSafeInteger(usage.prompt_tokens + usage.completion_tokens) &&
+      usage.prompt_tokens + usage.completion_tokens === usage.total_tokens &&
+      Number.isSafeInteger(usage.prompt_cache_hit_tokens + usage.prompt_cache_miss_tokens) &&
+      usage.prompt_cache_hit_tokens + usage.prompt_cache_miss_tokens === usage.prompt_tokens
+    const responseComplete = data.choices[0].finish_reason === 'stop'
+    const exactFacts = isDeepStrictEqual(actual, expected)
+    return { status: 'success', actual, exactFacts, responseComplete, passed: exactFacts && responseComplete, usage,
+      usageComplete,
       finishReason: data.choices[0].finish_reason, elapsedMs: performance.now() - started }
   } catch (error) {
     return { status: error.name === 'TimeoutError' || error.name === 'AbortError' ? 'timeout' : 'request-failed' }
