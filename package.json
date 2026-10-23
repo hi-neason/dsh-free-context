@@ -9,7 +9,9 @@
     "./snapshot": "./src/snapshot.js",
     "./read-lifecycle": "./src/read-lifecycle.js",
     "./economics": "./src/economics.js",
-    "./retirement": "./src/retirement.js"
+    "./retirement": "./src/retirement.js",
+    "./experiments": "./src/experiments.js",
+    "./text-selection": "./src/text-selection.js"
   },
   "files": ["src", "README.md", "LICENSE"],
   "engines": { "node": ">=24" },

@@ -209,6 +209,55 @@ ctx.on('free-context/retirement', record => console.log(record))
 
 底层 `resolveRetirementConfig`、`retireHistory` 和 `installRetirement` 也由 `dsh-free-context/retirement` 导出。历史退场是有损的模型上下文缩减，原日志与快照可恢复不等于模型任务语义无损；目前没有真实模型完整任务质量或净费用收益结论。
 
+## 可选的任务无关段落选择实验
+
+`dsh-free-context/experiments` 是独立函数插件，主插件不会自动加载它，默认 `mode: 'off'`。这是受论文启发的 LLM 段落选择实验，不是 LLMLingua-2 的模型训练或算法复现。宿主必须已有 `tools`、`llm` 和可用的 `spillStore`，并配置模型凭据；插件不自行读取环境密钥或创建 SDK。
+
+```js
+import * as Experiments from 'dsh-free-context/experiments'
+
+const experiment = await ctx.plugin(Experiments, {
+  mode: 'observe',
+  tools: ['prose'], // 换为明确返回纯说明文本的实际工具；精确允许列表。
+  provider: 'deepseek-official',
+  model: 'deepseek-flash',
+  maxInputBytes: 40000,
+  maxPromptBytes: 50000,
+  maxOutputBytes: 8000,
+  maxOutputTokens: 2048,
+  maxArtifactBytes: 70000,
+  timeoutMs: 60000,
+  maxParagraphs: 50,
+  maxCacheEntries: 2,
+  protectedTerms: [], // 在此明确列出必须保留所在段落的精确词语。
+  // 下列价格/未来轮数仅为演示，不是供应商报价或推荐预测。
+  pricing: {
+    currency: 'USD',
+    uncachedInputPerMillion: 1,
+    cacheReadPerMillion: 0.1,
+    outputPerMillion: 1,
+  },
+  futureCacheReadPerMillion: 0.1,
+  minimumFutureRequests: 1000,
+  expectedRecoveryCost: 0,
+  safetyMargin: 0.1,
+  maxCallCost: 1,
+})
+// await experiment.dispose()
+```
+
+`pricing` 只用于辅助模型的实际调用用量；`futureCacheReadPerMillion` 是被优化的主请求在未来命中缓存时的独立读价，两者不得因模型不同而混用。所有金额须与 `currency` 一致，价格均为每百万 token 单价。若用量包含缓存写入，必须补充 `pricing.cacheWritePerMillion`，否则不采用候选。`maxCallCost` 在调用前用“每个允许的 prompt 字节按一个 token、取最高已声明输入价，加输出上限费用”作保守估算门槛；它不是供应商计费硬上限。调用后的真实 usage 会再次检查费用。缺少价格、未来请求假设、必要用量，或预测净收益不足均不采用；已发生的辅助调用费用不会因此撤销。
+
+`maxInputBytes` 限制原输入，`maxPromptBytes` 限制完整请求消息序列化后的 UTF-8 字节数，不能等同模型输入 token 硬上限；`maxOutputBytes` 包括输出文本与 reasoning 流的字节数，`maxOutputTokens` 传给宿主请求的 `maxTokens`。`maxArtifactBytes` 限制调用审计文件。明确的代码围栏、JSON、TAP、列表及其他已识别结构保留原文，纯说明文本允许列表本身仍需调用方正确配置。
+
+模型仅返回 `selectedIds`；插件拒绝额外字段、改写文本、重复或越界 ID、空选择、未成功结束的流和遗漏保护词所在段落的选择。候选文本按原顺序从原文抽取，附段落 ID、UTF-16 起止位置与策略版本。来源匹配只证明这些片段来自原文，不证明未选段落没有必要证据。
+
+**`observe` 也会产生辅助模型费用并写入快照**，只是保持模型输入不变。插件先保存原文，成功选择后保存会话归属的审计 manifest（完整 prompt、response、原始与本次 usage、选择范围和预算），候选附两份真实恢复引用。只有包含引用的完整候选仍缩小，并通过净收益门槛时，`apply` 才选择替换模型可见工具内容；不改程序结构化值，也不直接改写主 Agent 请求或历史日志。存储失败或取消均保留原文，已写快照由宿主后端清理。
+
+`free-context/experiment` 事件只报告调用标识、模式、原因、用量、估算费用与缓存命中，不报告正文、工具参数或密钥。缓存按会话对象隔离，键包含完整原文哈希和模型/策略配置，每个会话最多保存 `maxCacheEntries` 项。命中时复用经过校验的选择，`originUsage` 表示原选择调用用量，`callUsage` 缺省且 `llmCalled: false` 表示本次没有新调用，不能再次计费。纯选择核心也可从 `dsh-free-context/text-selection` 导入 `createTextSelector`，但独立调用者需自行完成归档与经济门槛。
+
+已用官方 dsh runtime/provider 和 `deepseek-flash` 完成一次合成文本观察探针：实际输入 4,224 token、输出 9 token，保留保护段落；第二次命中缓存且无新模型调用，两次均保持原工具内容。该探针和 fake-adapter 集成测试验证了接口、归档、保护规则及失败边界，不是完整任务质量或账单收益证明；演示价格换算不等于供应商实收。
+
 ## 验证
 
 ```sh

@@ -1,0 +1,92 @@
+import { parseExperimentConfig } from './experiment-config.js'
+export { Config } from './experiment-config.js'
+import { createTextSelector } from './text-selection.js'
+import { createPostExecuteHandler } from './pipeline.js'
+import { measureContent, reportDecision } from './diagnostics.js'
+import { archiveOriginal, formatSnapshotReference } from './snapshot.js'
+import { assessNetBenefit } from './economics.js'
+
+export const name = 'dsh-free-context-experiments'
+export const inject = ['tools', 'llm']
+
+/** Price disjoint provider counters once; unknown cache-write price cannot justify adoption. */
+function callCost(usage, pricing) {
+  if (!usage || (usage.cacheWriteTokens > 0 && pricing.cacheWritePerMillion === undefined)) return undefined
+  const cost = (usage.inputTokens * pricing.uncachedInputPerMillion + usage.outputTokens * pricing.outputPerMillion +
+    (usage.cacheReadTokens ?? 0) * pricing.cacheReadPerMillion + (usage.cacheWriteTokens ?? 0) * (pricing.cacheWritePerMillion ?? 0)) / 1e6
+  return Number.isFinite(cost) ? cost : undefined
+}
+
+/** Optional auxiliary model experiment. No Agent request or historical message mutation. */
+export function apply(ctx, input) {
+  const config = parseExperimentConfig(input)
+  if (config.mode === 'off' || !config.tools.length) return
+  const select = createTextSelector({ ...config, llm: ctx.llm })
+  const warn = message => ctx.logger.warn(message)
+  const transform = async (content, exec) => {
+    let reason = 'unsupported-content'
+    let selection
+    let estimatedCost
+    let callCostUpperEstimate
+    try {
+      if (content.length !== 1 || content[0].type !== 'text' || typeof content[0].text !== 'string') return undefined
+      const original = measureContent(content)
+      if (original.bytes > config.maxInputBytes) { reason = 'input-byte-budget'; return undefined }
+      const pricing = config.pricing
+      if (!pricing?.currency || ['uncachedInputPerMillion', 'cacheReadPerMillion', 'outputPerMillion'].some(key => pricing[key] === undefined)) { reason = 'missing-pricing'; return undefined }
+      if (['minimumFutureRequests', 'expectedRecoveryCost', 'safetyMargin', 'maxCallCost', 'futureCacheReadPerMillion'].some(key => config[key] === undefined)) { reason = 'missing-economic-assumptions'; return undefined }
+      // Heuristic conservative admission: treat each permitted prompt byte as one
+      // input token, price every token at the highest declared input rate.
+      // This is an estimate, not a provider-specific token or billing guarantee.
+      callCostUpperEstimate = (config.maxPromptBytes * Math.max(pricing.uncachedInputPerMillion, pricing.cacheReadPerMillion, pricing.cacheWritePerMillion ?? pricing.uncachedInputPerMillion) + config.maxOutputTokens * pricing.outputPerMillion) / 1e6
+      if (!Number.isFinite(callCostUpperEstimate) || callCostUpperEstimate > config.maxCallCost) { reason = 'call-cost-budget'; return undefined }
+      const economics = (candidateTokens, compressionCost) => assessNetBenefit({
+        originalTokens: original.estimatedTokens, candidateTokens, invalidatedPrefixTokens: 0,
+        minimumFutureRequests: config.minimumFutureRequests,
+        pricing: { uncachedInputPerMillion: config.futureCacheReadPerMillion, cacheReadPerMillion: config.futureCacheReadPerMillion }, compressionCost,
+        expectedRecoveryCost: config.expectedRecoveryCost, safetyMargin: config.safetyMargin,
+      })
+      if (!economics(0, callCostUpperEstimate).adopt) { reason = 'no-predicted-benefit-before-call'; return undefined }
+      const store = ctx.get('spillStore')
+      reason = 'snapshot-failed'
+      const originalReceipt = await archiveOriginal(store, exec, content[0].text, { maxBytes: config.maxInputBytes })
+      reason = 'selection-failed'
+      selection = await select({ kind: 'prose', text: content[0].text, session: exec.agent?.session, signal: exec.signal })
+      estimatedCost = selection.cacheHit ? 0 : callCost(selection.callUsage, pricing)
+      if (selection.status !== 'selected') { reason = selection.reason; return undefined }
+      if (!selection.usageComplete || estimatedCost === undefined || callCost(selection.originUsage, pricing) === undefined) { reason = 'missing-priced-usage'; return undefined }
+      if (estimatedCost > config.maxCallCost) { reason = 'actual-call-cost-budget'; return undefined }
+      reason = 'manifest-failed'
+      const manifest = JSON.stringify({ version: 1, policy: selection.strategy, sourceHash: selection.sourceHash,
+        originalReceipt, selectedSpans: selection.spans.map(({ id, start, end }) => ({ id, start, end })),
+        budgets: { maxInputBytes: config.maxInputBytes, maxPromptBytes: config.maxPromptBytes, maxOutputBytes: config.maxOutputBytes, maxOutputTokens: config.maxOutputTokens, timeoutMs: config.timeoutMs },
+        audit: selection.audit, cacheHit: selection.cacheHit, callUsage: selection.callUsage,
+        originUsage: selection.originUsage, currency: pricing.currency, estimatedCost,
+      })
+      const manifestReceipt = await archiveOriginal(store, exec, manifest, { maxBytes: config.maxArtifactBytes })
+      const text = [`[LOSSY paragraph selection; policy ${selection.strategy}. Extracted source spans do not prove complete evidence.]`,
+        selection.text, formatSnapshotReference(originalReceipt),
+        'Auxiliary selection audit manifest (full request, response and usage):', formatSnapshotReference(manifestReceipt)].join('\n\n')
+      const replacement = [{ ...content[0], text }]
+      const output = measureContent(replacement)
+      if (exec.signal?.aborted) { reason = 'aborted'; return undefined }
+      if (output.bytes >= original.bytes || output.estimatedTokens >= original.estimatedTokens || original.estimatedTokens - output.estimatedTokens < config.minSavingsTokens) { reason = 'insufficient-size-savings'; return undefined }
+      if (!economics(output.estimatedTokens, estimatedCost).adopt) { reason = 'insufficient-net-benefit'; return undefined }
+      reason = config.mode === 'apply' ? 'selected' : 'observed'
+      return { content: replacement, strategy: selection.strategy, lossy: true }
+    } catch {
+      if (exec.signal?.aborted) reason = 'aborted'
+      return undefined
+    } finally {
+      await reportDecision(record => ctx.parallel('free-context/experiment', record), warn, {
+        tool: exec.name, callId: exec.callId, sessionId: exec.agent?.session?.header?.id,
+        mode: config.mode, reason, cacheHit: selection?.cacheHit ?? false, llmCalled: selection?.llmCalled ?? false,
+        callUsage: selection?.callUsage, estimatedCost, futureCacheReadPerMillion: config.futureCacheReadPerMillion, currency: config.pricing?.currency, callCostUpperEstimate,
+      })
+    }
+  }
+  ctx.on('tools/post-execute', createPostExecuteHandler(transform, warn, {
+    mode: config.mode, eligible: exec => config.tools.includes(exec.name),
+    report: record => ctx.parallel('free-context/decision', record),
+  }), { prepend: true })
+}
