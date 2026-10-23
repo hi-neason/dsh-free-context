@@ -218,10 +218,85 @@ npm run check
 
 单元测试覆盖下游顺序、结构化值保留、取消、失败回退和导出约定。`check` 是 JavaScript 语法检查，不代表类型检查或完整静态分析。
 
-真实组合测试需一个独立安装了以下官方包的目录：`@deepseek-ai/cordis`、`@deepseek-ai/cordis-plugin-loader`、`@deepseek-ai/dsh-system-prompt`、`@deepseek-ai/dsh-tools`。
+测试和评测从源码 checkout 运行，要求 Node.js 24+。官方运行时装在独立目录，不是插件的生产依赖：
+
+```sh
+npm install --prefix /path/to/runtime \
+  @deepseek-ai/cordis@4.0.5 \
+  @deepseek-ai/cordis-plugin-loader@1.0.6 \
+  @deepseek-ai/cordis-plugin-include@1.0.10 \
+  @deepseek-ai/dsh-agent-loop-testkit@0.2.1-rc.2 \
+  @deepseek-ai/dsh-compaction-tool-result-pruner@0.2.1-rc.2 \
+  @deepseek-ai/dsh-llm-deepseek-api-key@0.2.1-rc.2 \
+  @deepseek-ai/dsh-session@0.2.1-rc.2 \
+  @deepseek-ai/dsh-system-prompt@0.2.1-rc.2 \
+  @deepseek-ai/dsh-tools@0.2.1-rc.2 \
+  @deepseek-ai/dsh-token-meter@0.2.1-rc.2 \
+  @deepseek-ai/dsh-spill@0.2.1-rc.2 \
+  @deepseek-ai/dsh-spill-local@0.2.1-rc.2 \
+  @deepseek-ai/dsh-spill-policy@0.2.1-rc.2 \
+  @deepseek-ai/dsh-fs-local@0.2.1-rc.2 \
+  @deepseek-ai/dsh-tool-fs@0.2.1-rc.2
+```
 
 ```sh
 DSH_RUNTIME_ROOT=/path/to/runtime npm run test:integration
 ```
 
-默认测试目录为 `.omx/integration-runtime`。已验证 Cordis `4.0.5`、Loader `1.0.6`、dsh `0.2.1-rc.2`：实际工具执行、策略组合顺序、结构化值保留、命名导出解析及卸载。已验证官方 Include/Loader YAML 组合，以及生产路由 baseline/observe/apply、下游内容与附加上下文保留、允许列表与收益门槛、PTC/失败/value 替换跳过及候选取消。未验证完整 dsh CLI/GUI 启动、真实模型请求、完整任务成本或任务质量评估。
+默认测试目录为 `.omx/integration-runtime`。已验证 Cordis `4.0.5`、Loader `1.0.6`、dsh `0.2.1-rc.2`：实际工具执行、策略组合顺序、结构化值保留、命名导出解析及卸载。已验证官方 Include/Loader YAML 组合，以及生产路由 baseline/observe/apply、下游内容与附加上下文保留、允许列表与收益门槛、PTC/失败/value 替换跳过及候选取消。未验证完整 dsh CLI/GUI 启动；有限的真实 Agent 任务评测见下节，不能外推到所有功能或工作负载。
+
+
+## 可复现评测
+
+```sh
+# 无模型调用：真实 router/pipeline/codec 与官方原生裁剪的内容微基准。
+DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate
+
+# 无凭据：真实 AgentLoop、工具、spill/read，脚本化 provider 验证控制流。
+DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:agent -- --replay
+
+# 真实官方 provider：显式提供私有凭据文件，勿提交该文件或运行日志。
+DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:agent -- \
+  --credential-file /private/path/deepseek.key --model deepseek-flash \
+  --pricing-file /private/path/pricing.json
+```
+
+也可通过 `DEEPSEEK_API_KEY` 环境变量提供凭据。Agent runner 使用官方 `deepseek-official` provider，关闭 thinking，单次输出上限 1024 token、流空闲超时 30 秒、每任务最多 8 个模型步骤和 120 秒。质量要求在运行前固定：精确事实零遗漏、实际调用 fixture；TAP 任务必须执行 read，插件提供快照时必须读取该快照。答复不合要求、恢复失败、超限或 usage 不完整会使完整评测非零退出。工具调用和回读都计入该任务后续请求及累计 provider usage。
+
+三组均使用真实官方 AgentLoop、SpillLocal、ToolFs 和 SpillPolicy：`baseline-default` 采用 base bundle 的 12500 inline token 上限；`baseline-tuned` 改为 1200；`plugin` 在 12500 上限上启用本插件 JSON/TAP 策略。这是明确声明的运行时组合，不包含完整 CLI profile 的所有插件，也未启用历史退场。离线 `evaluate` 中同名基线则仅调用官方 `pruneContent` 的默认/调优配置，不能等同完整 Agent 基线；离线字节除以三的估算不属于 provider 实耗。
+
+可选的价格 JSON 使用每百万 token 的 USD 单价，例如以下**有日期范围的历史快照**，重新运行前应核对当前模型、峰谷时段和假期规则：
+
+```json
+{
+  "currency": "USD",
+  "model": "deepseek-flash",
+  "sourceUrl": "https://api-docs.deepseek.com/quick_start/pricing/",
+  "verifiedDate": "2026-10-23",
+  "ratePeriod": "peak",
+  "uncached": 0.3,
+  "cacheRead": 0.006,
+  "output": 1.2
+}
+```
+
+费用按 dsh **互斥计数**计算：uncached input、cache read、output 分别乘价，不把缓存读重复计入未缓存输入。脚本不会自动判断价格时段；调用者须确保统一价格适用于整次运行。未提供价格、计数缺失或无效、存在未定价的 cache write 时，费用为 `null`。金额是根据 provider usage 的费用估算，不是账单扣款。`evaluate:live` 仅提供原文/插件文本的同 query 单轮问答辅助对照，不替代 AgentLoop 任务评测。
+
+### 2026-10-23 有限任务结果
+
+`deepseek-flash` 在 UTC 08:47、上列 peak 价格下运行两个固定任务：重复 JSON 中精确定位记录；Node TAP 中回读原文确认被预览省略的耗时。修正后的统一查询六组均通过，结果包含全部工具回读与模型步骤：
+
+| 任务 | 组 | 模型步骤 | 累计实耗 token（含缓存读） | 费用估算 USD |
+| --- | --- | ---: | ---: | ---: |
+| JSON | 默认 | 2 | 4509 | 0.001160208 |
+| JSON | 调优 | 4 | 9118 | 0.001326360 |
+| JSON | 插件 | 2 | 2063 | 0.000426408 |
+| TAP 原文恢复 | 默认 | 4 | 14760 | 0.001718604 |
+| TAP 原文恢复 | 调优 | 3 | 11108 | 0.002357172 |
+| TAP 原文恢复 | 插件 | 3 | 9473 | 0.002134596 |
+
+两任务累计默认 19269 token / $0.002878812，调优 20226 / $0.003683532，插件 11536 / $0.002561004。插件 TAP 任务虽然 token 较少，费用仍高于默认组，因为未缓存输入与输出占比不同；不能仅按总 token 推断费用。
+
+首轮不是全通过：JSON 三组通过，TAP 调优组答复未满足 JSON 验收，插件组事实正确但读取了原文件而非指定快照。随后对三组使用相同的明确快照优先与 JSON 输出要求，再运行完整套件得到上表；首轮失败未被当作成功或从历史记录删除。这是调整过任务说明后的结果，不能用作未见样本的泛化证明。
+
+任务按固定组顺序执行，共享 provider cache，存在顺序和缓存混杂；样本仅两个、每组一次。以上不证明一般 coding 任务收益，也不证明历史退场或其他未参与策略的净收益。后续需要固定任务说明、多次重复并交错组序、扩充真实工作负载，再评估质量与费用分布。

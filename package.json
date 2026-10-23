@@ -16,7 +16,10 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "check": "node scripts/check.js",
-    "test:integration": "node --test test/integration/*.test.js"
+    "test:integration": "node --test test/integration/*.test.js",
+    "evaluate": "node scripts/evaluate.js",
+    "evaluate:agent": "node scripts/evaluate-agent.js",
+    "evaluate:live": "node scripts/evaluate-live.js"
   },
   "license": "MIT"
 }
