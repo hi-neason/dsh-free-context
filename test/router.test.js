@@ -101,3 +101,15 @@ test('observe mode archives and complete receipt can disqualify apparent savings
   assert.equal(await createContentRouter(logConfig({ minSavingsTokens: 1000000 }), { getStore: () => assert.fail('do not save hopeless candidate') })(logBlocks(), logExec()), undefined)
   assert.equal(createContentRouter(config(), { getStore: () => assert.fail('logs are disabled') })(logBlocks(), logExec()), undefined)
 })
+
+test('explicit input budgets above one MiB also bound the verification decoder output', () => {
+  const largeRows = Array.from({ length: 15000 }, (_, index) => ({
+    very_long_identifier_field_name: index, another_very_long_description_field_name: 'abc',
+  }))
+  const blocks = [{ type: 'text', text: JSON.stringify(largeRows) }]
+  assert.ok(Buffer.byteLength(blocks[0].text) > 1048576)
+  const budget = 3000000
+  const candidate = createContentRouter(config({ maxInputBytes: budget }))(blocks, exec)
+  assert.equal(candidate.strategy, 'json-rows-v1')
+  assert.deepEqual(JSON.parse(decodeJsonRows(candidate.content[0].text, { maxOutputBytes: budget })), largeRows)
+})

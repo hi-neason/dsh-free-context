@@ -24,7 +24,9 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
       if (encoded !== undefined) {
         const replacement = [{ ...block, text: encoded }]
         if (!smaller(replacement)) return undefined
-        const restored = decodeJsonRows(encoded, { maxInputBytes: config.maxInputBytes })
+        const restored = decodeJsonRows(encoded, {
+          maxInputBytes: config.maxInputBytes, maxOutputBytes: config.maxInputBytes,
+        })
         if (!isDeepStrictEqual(JSON.parse(restored), JSON.parse(block.text))) return undefined
         return { content: replacement, strategy: 'json-rows-v1', lossy: false }
       }

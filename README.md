@@ -85,7 +85,7 @@ if (candidate !== undefined) {
 
 编码器采取保守准入：解析后去除字符串外空白的输入必须与重新序列化完全相同，并拒绝不安全整数、非有限数和负零。因此重复键、精度变化，以及部分合法但非规范的指数、转义形式会返回 `undefined`，调用方应保留原文。解码器严格校验格式版本、字段、schema 唯一性和行长度，非法输入会抛错；`__proto__` 等键作为普通自有数据属性恢复。
 
-独立编码器产生的候选可能比原文更长，获得候选不代表 token 节省；生产路由会计入完整 envelope 和内容块开销后执行字节数与估算 token 收益门槛。后续若加入格式说明或恢复引用，也须纳入候选总成本。固定查询测试验证恢复数据的筛选、求和和嵌套查询一致性；下文有限的真实 Agent JSON 任务也验证了紧凑格式上的指定筛选、计数与求和，不能外推为任意任务的质量保证。
+独立编码器产生的候选可能比原文更长，获得候选不代表 token 节省；生产路由会计入完整 envelope 和内容块开销后执行字节数与估算 token 收益门槛。后续若加入格式说明或恢复引用，也须纳入候选总成本。固定查询测试验证恢复数据的筛选、求和和嵌套查询一致性；下文有限的真实 Agent JSON 任务也验证了紧凑格式上的指定记录定位与字段提取，不能外推为任意任务的质量保证。
 
 ## Node TAP 日志精简
 
@@ -129,9 +129,9 @@ async function prepareSnapshot(ctx, exec, originalText) {
 
 产生原文快照的主插件路径与独立实验会登记 `free-context/snapshot`；候选的 `free-context/decision.snapshots` 关联相同引用。事件仅含不透明 `referenceId`（locator 与 SHA-256 的哈希）、`sha256`、`bytes`、`sourceCallId`、`sessionId` 和 `purpose`（`original`、`audit`、`retirement`），不含 locator、恢复提示、原文或工具参数。归档记录不等于候选已采用。
 
-`free-context/recovery` 只观察同一 Session 对象中、`read.file_path` 精确等于已登记 locator 的现有 read 调用，报告 `recoveryCallId`、原引用及 `success/failed/blocked/modified/cancelled` 状态；成功且返回结构有效时附实际 `startLine/endLine/totalLines`。不推断别名，不重新读取源文件，也不提供额外恢复工具。所有事件均为 `verifiedFull: false`：返回全部行仍不能证明原始换行、字节数和哈希完全一致，更不能证明模型使用了这些内容。观察者异常不改变工具决策。
+`free-context/recovery` 只观察同一 Session 对象中、`read.file_path` 精确等于已登记 locator 的现有 read 调用，报告 `recoveryCallId`、原引用及 `success/failed/blocked/modified/cancelled` 状态；成功且返回结构有效时附实际 `startLine/endLine/totalLines`。不推断别名，不重新读取源文件，也不提供额外恢复工具。所有事件均为 `verifiedFull: false`：返回全部行仍不能证明原始换行、字节数和哈希完全一致，更不能证明模型使用了这些内容。这些状态反映该 post-execute 观察点的结果；外层策略之后仍可能修改内容，不证明最终 Session 或模型消费。观察者异常不改变工具决策。
 
-`installSnapshotTracking(ctx, { maxEntriesPerSession: 128 })` 从 `dsh-free-context/snapshot-telemetry` 导出，返回 `record(exec, receipt, purpose)` 与 `dispose()`。登记表按 Session 对象弱引用隔离并限制条目数；淘汰或卸载只删除诊断元数据。恢复/fork 不自动重建表，宿主可用已知完整快照 receipt 在相应 Session 上显式重新登记。存储权限与保留期限仍由宿主负责。
+`installSnapshotTracking(ctx, { maxEntriesPerSession: 128 })` 从 `dsh-free-context/snapshot-telemetry` 导出，返回 `record(exec, receipt, purpose)` 与 `dispose()`。登记表按 Session 对象弱引用隔离并限制条目数；淘汰或卸载只删除诊断元数据。恢复/fork 不自动重建表。只有目标 Session 的 ID 与 receipt.sessionId 一致时才可显式重新登记；新 ID 的 fork 不能登记父会话 receipt，但原文能否读取仍由后端权限决定。存储权限与保留期限仍由宿主负责。
 
 ## 文件读取生命周期
 
