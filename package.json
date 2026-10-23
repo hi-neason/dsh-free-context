@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.js",
     "./json": "./src/json-codec.js",
-    "./snapshot": "./src/snapshot.js"
+    "./snapshot": "./src/snapshot.js",
+    "./read-lifecycle": "./src/read-lifecycle.js"
   },
   "files": ["src", "README.md", "LICENSE"],
   "engines": { "node": ">=24" },

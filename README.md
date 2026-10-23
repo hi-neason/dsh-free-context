@@ -123,6 +123,26 @@ async function prepareSnapshot(ctx, exec, originalText) {
 
 当前 JSON 路由使用可逆编解码，不调用该模块；有损日志路由已接入，替换前必须取得快照引用。官方 `spill-local` 集成测试验证了完整文件回读的字节与哈希、源文件变化后的快照稳定性及存储失败；尚未验证真实模型恢复过程或官方 read 工具分页调用。
 
+## 文件读取生命周期
+
+在已加载文件工具的 Cordis 上下文中，可显式安装读取跟踪器：
+
+```js
+import { installReadTracking } from 'dsh-free-context/read-lifecycle'
+
+const tracking = installReadTracking(ctx, { maxEntriesPerSession: 256 })
+// 在真实 read 调用完成后，用该调用所属的 Session 对象和 callId 查询。
+const state = tracking.query(agent.session, callId)
+console.log(state) // undefined，或包含 status、start/end、version 等的冻结记录
+tracking.dispose() // 移除监听并丢弃优化元数据；所属 Cordis 上下文卸载也会清理。
+```
+
+跟踪器将 `fs/observed` 的不透明 `targetKey`、版本与成功 read 的真实返回行范围按 `callId` 关联，不用请求的 `limit` 推断已返回内容。只有相同目标、相同非空版本、新范围完整覆盖旧范围，且重叠行文本哈希一致时，旧记录才标为 `superseded` 并给出 `supersededBy`。行文本比较用于避免不同截断长度造成错误覆盖。部分覆盖、零行和不同 Session 对象不能建立覆盖关系。
+
+`status` 可为 `active`、`superseded`、`stale` 或 `unknown`。版本变化和文件缺失观察会标记 `stale`；缺少版本、观察冲突等情况保守视为 `unknown`。查询不到记录也不能推断内容已过期。跟踪器仅保存本进程优化元数据：每个 Session 对象的读取记录和待完成观察分别最多保留配置条数，淘汰和卸载不影响历史内容；恢复会话或 fork 后不自动重建这些记录。
+
+此辅助接口不会自动加载到主插件，也不归档、删除或替换历史消息。调用方可用 `callId` 关联持久化原文引用；后续历史优化仍须写入受支持的 Session 决策。版本只反映宿主发出的观察，无法检测未发出事件的外部修改，不是文件锁或实时新鲜度保证。实际 fs-local/tool-fs 组合测试覆盖部分读取、完整读取、修改后的版本变化和字节上限导致的真实返回范围。
+
 ## 验证
 
 ```sh
