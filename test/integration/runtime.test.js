@@ -29,7 +29,7 @@ test('official runtime loads named exports, composes real tool policies, and dis
   assert.equal(loader.unwrapExports(plugin), plugin)
   const baseline = await ctx.tools.execute(exec())
   assert.equal(baseline.isError, false)
-  const production = await ctx.plugin(loader.unwrapExports(plugin))
+  const production = await ctx.plugin(loader.unwrapExports(plugin), { tools: ['fixture'] })
   assert.deepEqual(await ctx.tools.execute(exec()), baseline)
 
   const events = []
@@ -63,4 +63,19 @@ test('official runtime loads named exports, composes real tool policies, and dis
   await downstream.dispose()
   await production.dispose()
   assert.deepEqual(await ctx.tools.execute(exec()), baseline)
+})
+
+
+test('official runtime validates plugin config, freezes normalized values, and accepts off mode', async t => {
+  const ctx = new Context()
+  t.after(() => ctx.fiber.dispose())
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(ToolRuntime)
+  await assert.rejects(async () => { await ctx.plugin(plugin, { mode: 'apply', tools: ['fixture', 'fixture'] }) }, /duplicate/)
+  const fiber = await ctx.plugin(plugin, { mode: 'off', tools: ['fixture'] })
+  assert.equal(fiber.config.mode, 'off')
+  assert.equal(fiber.config.logs.enabled, false)
+  assert.equal(Object.isFrozen(fiber.config), true)
+  assert.equal(Object.isFrozen(fiber.config.tools), true)
+  await fiber.dispose()
 })

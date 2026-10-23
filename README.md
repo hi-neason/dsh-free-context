@@ -18,6 +18,34 @@ await fiber.dispose()
 
 插件通过 `tools/post-execute` 的前置监听器先等待 `next()`，再读取下游决策。仅处理模型可见内容，保留结构化 `value` 与附加上下文；阻止决策、结构化值替换、失败结果、取消和 PTC 内部调用直接通过。内部转换函数收到内容副本，失败保留既有决策。当前未注册历史改写或 PTC 日志转换。
 
+## 配置与保护
+
+```js
+const fiber = await ctx.plugin(FreeContext, {
+  mode: 'observe',
+  tools: ['read'],
+  minInputBytes: 1024,
+  maxInputBytes: 1048576,
+  minSavingsTokens: 32,
+  json: { enabled: true },
+  logs: { enabled: false },
+})
+```
+
+| 配置 | 默认值 | 约束与用途 |
+| --- | --- | --- |
+| `mode` | `observe` | 仅接受 `observe`、`apply`、`off`；`off` 不注册处理监听器 |
+| `tools` | `[]` | 工具名精确允许列表；空列表表示不处理任何工具；拒绝空名、空白字符与重复项 |
+| `minInputBytes` | `1024` | 输入 UTF-8 字节数下界，含边界 |
+| `maxInputBytes` | `1048576` | 输入 UTF-8 字节数上界，含边界；必须大于零且不小于下界 |
+| `minSavingsTokens` | `32` | 候选策略要求的最小估算 token 节省量 |
+| `json.enabled` | `true` | JSON 策略开关 |
+| `logs.enabled` | `false` | 有损日志策略开关，默认关闭 |
+
+所有数字必须为非负安全整数；未知键、错误类型和无效配置会在加载时明确报错，即使 `mode` 为 `off` 也要通过校验。配置经过复制和递归冻结，不受调用方后续修改影响。两种策略都关闭时不注册监听器。
+
+目前配置校验、禁用开关和工具/体积资格判定已就绪，压缩策略与观察记录将在后续功能接入。因此此阶段 `observe` 和 `apply` 都保持原文，开启策略不会立即压缩或产生观察统计；`minSavingsTokens` 将用于后续候选收益检查。路径、命令、错误码和数值的内容保护仍由后续具体策略验收，本阶段不提供会静默丢弃字段的配置。
+
 ## 验证
 
 ```sh

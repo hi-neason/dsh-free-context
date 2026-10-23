@@ -88,7 +88,7 @@ test('named function plugin registers only the prepended post-execute policy', a
   assert.equal('default' in plugin, false)
   assert.deepEqual(plugin.inject, ['tools'])
   const listeners = []
-  plugin.apply({ on: (...args) => listeners.push(args), logger: { warn: assert.fail } })
+  plugin.apply({ on: (...args) => listeners.push(args), logger: { warn: assert.fail } }, { tools: ['fixture'] })
   assert.equal(listeners.length, 1)
   const [event, handler, options] = listeners[0]
   assert.equal(event, 'tools/post-execute')
