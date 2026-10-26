@@ -2,7 +2,7 @@
 
 DeepSeek Harness（dsh）的独立上下文优化插件，目标是在保持 Agent 任务质量的前提下降低累计 token 消耗与实际费用。
 
-当前支持工具结果处理、观察诊断、保守 JSON 路由与可选 Node TAP 日志精简；默认保持原文，显式配置允许工具并选择 `apply` 后才采用合格候选。尚无完整模型任务的实测节省比例。使用 ESM JavaScript 和 Node.js 24，无运行时依赖，服务由宿主 dsh 提供。
+当前支持工具结果处理、观察诊断、保守 JSON 路由与可选 Node TAP 日志精简；默认保持原文，显式配置允许工具并选择 `apply` 后才采用合格候选。已有固定任务的完整模型对照，尚未通过全部十四项验收，结果与限制见下文。使用 ESM JavaScript 和 Node.js 24，无运行时依赖，服务由宿主 dsh 提供。
 
 ## 接入
 
@@ -97,6 +97,12 @@ if (candidate !== undefined) {
 
 **观察模式有存储副作用**：`observe` 为计算真实引用成本也会归档原文，但不改变模型输入。即使最终引用太长、收益不足或归档后取消，后端也可能已留下快照；由宿主存储清理策略管理。预览可恢复不代表任务语义无损；下文真实 Agent 评测仅覆盖指定合成任务，其结果不能外推到其他日志与工作负载。
 
+## 与原生 spill 的加载顺序
+
+要在原生 spill 前完成结构压缩，应先加载本插件，再加载原生 `spill-policy`；原生监听器在回程中对处理后的结果执行同样的大小上限。若原生策略先加载，本插件仍保持安全回退，但可能只能看到已裁剪的预览。不要为提高压缩命中率而关闭原生兜底，或把更大的 inline 预算当成插件收益。
+
+官方 CLI 的公开 patch 接口可禁用原 `spill-policy` 条目，再依次追加本插件和新的原生策略条目（例如 `maxInlineTokens: 1200`）。这属于公开配置组合，不修改官方代码。集成测试覆盖两种顺序、未知文本的原生兜底，以及不会同时替换结构化值与模型内容的约束。
+
 ## 原文快照
 
 需要有损转换时，可先通过宿主 `spillStore` 保存工具执行当时的完整原文：
@@ -122,8 +128,35 @@ async function prepareSnapshot(ctx, exec, originalText) {
 
 `locator` 与 `retrievalHint` 原样来自后端，不由插件推导路径。`formatSnapshotReference` 提供精确引用与恢复说明：按后端指引使用现有 read/grep 能力，完整恢复时读取全部分页并核对 UTF-8 字节数与 SHA-256。局部读取或 grep 命中不代表全文校验，也不能用源文件当前内容代替快照。存储保留期限和访问权限由宿主后端管理；保存成功不保证引用永久有效。
 
-当前 JSON 路由使用可逆编解码，不调用该模块；有损日志路由已接入，替换前必须取得快照引用。官方 `spill-local` 集成测试验证了完整文件回读的字节与哈希、源文件变化后的快照稳定性及存储失败；下文真实 Agent TAP 任务另验证了模型通过官方 read 回读指定快照；尚未覆盖全部分页与大文件恢复情形。
+当前 JSON 路由使用可逆编解码，不调用该模块；有损日志路由已接入，替换前必须取得快照引用。官方 `spill-local` 集成测试验证了完整文件回读的字节与哈希、源文件变化后的快照稳定性及存储失败；下文真实 Agent TAP 任务另验证了模型通过官方 read 回读指定快照；原始字节分页与失败边界另见下节；不能以官方 read 的显示文本代替字节校验。
 
+
+## 原始字节校验与模型分页恢复
+
+官方 `read` 面向阅读，会规范化换行并截断超长行；`fs.readText` 也可能去除 BOM。因此它们的可见文本不能证明 CRLF、BOM 或长行的字节完全恢复。`dsh-free-context/recovery` 提供 `verifySnapshot(receipt, bytes)` 与 `recoverSnapshot(receipt, readPage, options)`；后者仅通过显式提供的后端适配器读取不透明 locator，完整验证字节数及 SHA-256 后才返回原始字节。默认最大 1 MiB、每页 16 KiB、等待 10 秒；同一适配器最多 4 个未结束读取，取消或超时不会提前释放底层名额。
+
+需要模型精确分页时，宿主可显式安装可选工具，并让主插件和实验共用授权登记表：
+
+```js
+import { installSnapshotTracking } from 'dsh-free-context/snapshot-telemetry'
+import { installSnapshotRecovery } from 'dsh-free-context/recovery-tool'
+
+const tracking = installSnapshotTracking(ctx)
+ctx.provide('freeContextSnapshots', tracking) // 在加载主插件或实验前提供。
+const recall = installSnapshotRecovery(ctx, {
+  tracking,
+  // 只适用于已明确采用本地 spill 后端、并由宿主授权读取的配置。
+  // 其他后端必须提供自己的授权适配器，不能把 locator 猜成文件路径。
+  readPage: async (locator, { offset, length, signal }) =>
+    ctx.fs.readByteRange(await ctx.fs.resolve(locator, { signal }), { offset, length }, signal),
+  pageCharacters: 2048,
+})
+// 然后通过 ctx.plugin 加载主插件/实验；结束时 recall.dispose()。
+```
+
+`free_context_recall` 只接受当前 Session 登记的 `referenceId` 和字符范围，不接受模型提交的 locator 或 receipt。主插件的快照提示包含相同 ID。每次返回前校验完整快照，按 Unicode 码点分页，JSON 字符串保持 CRLF、BOM 与 emoji；沿 `nextOffset` 读取到 `null`。`snapshotVerified` 表示内部完整字节校验成功，`pageComplete` 才表示本页包含全文。引用过期、内容改变、错误会话、取消或超出预算均失败，不改读当前源文件。
+
+该工具不是根插件默认安装项。登记表有界且仅属于当前 Session 对象；重启、恢复或 fork 不自动获得原登记表的授权。宿主需先确认后端权限，再显式重新登记，不能仅凭日志中出现 ID 就授予访问。已有官方 AgentLoop 测试验证真实插件产生的快照进入同一登记表、模型逐页回读及持久化文本重放；脚本化 provider 验证协议，不代表真实模型推理收益。
 
 ## 快照与回读诊断关联
 
@@ -181,6 +214,10 @@ console.log(decision.adopt, decision.reason, decision.conservativeNetBenefit)
 函数从预测毛节省中预留 `safetyMargin` 比例，再扣除全部增量成本，仅在剩余净收益严格大于零时建议采用。`breakEvenRequests` 是在同一假设下跨过保守门槛的最小整数请求数；无法给出安全有限阈值时为 `null`。无压缩、无未来请求或缓存读价为零均不采用。
 
 这些输出是基于调用方价格和未来请求假设的预测，不是账单证据，也不保证预测轮次一定发生。反复失效需要重新评估；模型质量、额外回合和真实缓存行为仍需完整任务对照验证。
+
+可选 `calibrateRequestForecast(observations, options)` 从至少 3 个同范围的完整真实运行生成保守建议：未来轮数取观测最小值并受默认 8 次上限限制，回读费用取观测最大值。它拒绝重复、失败、用量缺失、模拟或范围不一致的样本。范围应明确包含任务类型、模型、策略与计价制度；数据真实性仍由调用方负责，历史最小值不是未来保证。
+
+历史配置可显式提供 `retirement.forecast: { scope, observations, maximumRequests }`。每条观测包含 `runId`、同一 `scope`、`usageKind: 'provider-reported'`、`usageComplete: true`、`qualityPassed: true`、`remainingRequests` 和 `recoveryCost`。该配置只会缩短已有 `minimumFutureRequests`、提高已有 `expectedRecoveryCost`；样本不足或不可用时未来轮数归零，禁止据此采用。未提供时继续使用明确声明的人工假设，不应把假设称为实测预测。
 
 ## 历史结果退场
 
@@ -337,6 +374,15 @@ npm test
 npm run check
 ```
 
+完整 CLI 验证使用另一个隔离目录的官方可执行包，不向插件添加生产依赖：
+
+```sh
+npm install --prefix /path/to/cli-runtime @deepseek-ai/dsh@0.2.1-rc.2
+DSH_CLI_RUNTIME_ROOT=/path/to/cli-runtime node --test test/integration/cli.test.js
+```
+
+该测试真正启动官方 headless CLI 子进程，验证 YAML 加载、结构化值、原生 spill 组合、持久化 Session 重启和关闭策略。官方 headless 不支持直接采用 fork 会话；fork 由 Session API 集成测试覆盖。
+
 单元测试覆盖下游顺序、结构化值保留、取消、失败回退和导出约定。`check` 是 JavaScript 语法检查，不代表类型检查或完整静态分析。
 
 测试和评测从源码 checkout 运行，要求 Node.js 24+。官方运行时装在独立目录，不是插件的生产依赖：
@@ -449,3 +495,32 @@ DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:retirement -- \
 插件比默认贵 $0.000172224、比调优贵 $0.000418356。门槛在未来 200 次假设下预测保守净收益 $0.000807534、回本需 103 次，但实际只有 2 次；预期回读费用为零也不符合该任务。这说明乐观假设不能替代实测，短任务可能负收益。相同任务使用未来 2/5 次假设的官方 AgentLoop 回放均拒绝退场，保持完整任务质量；这是控制流证据，不是额外真实模型实测。
 
 首轮未来 100 次假设被真实经济门槛拒绝，默认和插件组答复还未满足严格 JSON 输出要求。保留首轮失败后，对三组统一强化最终输出要求，再以明确标注的 200 次压力假设运行上表；不能把这种修订当作泛化质量或预测准确率证明。固定组序、共享缓存和每组一次的限制仍然适用，费用是估算而非账单扣款。
+
+
+### 2026-10-26 版本化完整任务对照
+
+验收工具提供固定任务清单、每任务三次重复、三组均衡顺序、逐次 JSONL 记录及源码/运行时摘要。默认回放仅验证控制流；真实运行须显式提供凭据文件与价格。输出已存在时拒绝覆盖。
+
+```sh
+DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:acceptance -- --version 2 \
+  --output /private/path/replay-v2.json
+DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:acceptance -- --version 2 --live \
+  --credential-file /private/path/deepseek.key --pricing-file /private/path/pricing.json \
+  --output /private/path/live-v2.json
+```
+
+v2 在官方 rc.2 AgentLoop 上运行 13 个固定任务，共 117 次真实模型任务。模型为 `deepseek-flash`，清单哈希 `5e220ecd0d2b156fa9b02cfc0e927ea74bbb767eaa991739adefb25b20e30bcd`，执行源码摘要 `024fb203f0d61742d16227ceab4652fec0d4e5c093f8bcb49a659c7133905552`。插件与调优原生组均使用 1200 inline 上限；允许每阶段至多两次不含答案的协议纠错，全部调用均计费。
+
+| 组 | 核心任务质量 | 核心任务费用 USD | 全套质量 | 全套费用 USD |
+| --- | ---: | ---: | ---: | ---: |
+| 默认 dsh | 24/24 | 0.037454184 | 39/39 | 0.071092596 |
+| 调优原生 dsh | 24/24 | 0.031636800 | 33/39 | 0.058349604 |
+| 插件 + 调优原生 | 24/24 | 0.024350904 | 36/39 | 0.050911176 |
+
+核心任务累计与逐任务收益中位数均为正，通过本轮 `coreAccepted`。未知格式和文件编辑任务仍分别有小额负收益。模型实验没有发生实际采用；其质量失败、全部成本及无采用结果均保留，`fullAccepted=false`。1000 次未来请求的历史压力用例只验证退场和恢复，不参与净收益验收。
+
+先前冻结 v1 的 90 次真实运行未通过：插件费用约 0.066018 USD，调优原生约 0.060105 USD，存在质量失败、原生预算不一致和无实验采用。v2 明确修订任务表述与组合配置，保留 v1 数据；两版不能当作同一协议的连续重复。
+
+所有费用采用 2026-10-26 核实的统一官方高峰单价，以便组间比较；实际峰谷账单可能不同。均衡顺序仍无法控制服务端共享缓存，这些合成固定任务不能证明一般工作负载节费。核心通过也不等于历史预测已实证校准，或三项模型实验已有净收益。
+
+`originalAcceptance()` 另要求完整原始校准记录和绑定的负收益回测；不会信任单独的成功标志。校准器校验来源、策略、每阶段新答案、所有模型调用及用量总和，并从调用位置推导真实剩余请求数。旧报告缺少这些记录会被拒绝。每份报告仍依赖可信运行器提供，不能用本地校验认证伪造的模型记录。
