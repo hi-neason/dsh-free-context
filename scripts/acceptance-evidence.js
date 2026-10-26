@@ -64,7 +64,10 @@ export function originalAcceptance(report, calibrationEvidence, negativeBacktest
     Array.isArray(reports) && isDeepStrictEqual(reports.map(item => item?.runId).sort(), [...expectedRunIds].sort())
   const comparableEnvironment = membershipComplete && reports.every(item => item && isDeepStrictEqual(item.provenance, report?.provenance) && item.model === report?.pricing?.model && Array.isArray(item.tasks) && item.tasks.every(task => isDeepStrictEqual(task?.pricing, report.pricing)))
   const calibration = comparableEnvironment ? calibrateRetirementReports(reports) : { status: 'declined', reason: membershipComplete ? 'incomparable-benchmark-environment' : 'incomplete-frozen-membership' }
-  const backtest = verifyShortHorizonBacktest(negativeBacktest, calibration)
+  const overlapsCalibration = Array.isArray(reports) && reports.some(item =>
+    item?.runId === negativeBacktest?.report?.runId || retirementEvidenceHash(item) === negativeBacktest?.expectedReportHash)
+  const backtest = overlapsCalibration ? { passed: false, reason: 'backtest-overlaps-calibration' }
+    : verifyShortHorizonBacktest(negativeBacktest, calibration)
   const calibrationEvidenceComplete = calibration.status === 'calibrated'
   return { accepted: benchmarkAccepted && calibrationEvidenceComplete && backtest.passed,
     benchmarkAccepted, calibrationEvidenceComplete, shortHorizonBacktestPassed: backtest.passed, calibration, backtest,

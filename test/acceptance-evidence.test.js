@@ -38,6 +38,7 @@ function evidence() {
       usage: { ...usage(group === 'plugin' ? 400 : 200), outputTokens: 2 },
     })) }))
   const negative = structuredClone(reports[0])
+  negative.runId = 'held-out-negative'
   return { calibration: { reports, expectedRunIds: reports.map(report => report.runId) }, backtest: { report: negative, expectedReportHash: retirementEvidenceHash(negative) } }
 }
 test('original acceptance recomputes benchmark, calibration and pinned negative backtest', () => {
@@ -93,4 +94,14 @@ test('hindsight rejection cannot pass when the derived calibration would still a
   assert.equal(result.backtest.hindsightPassed, true)
   assert.equal(result.backtest.calibratedPassed, false)
   assert.equal(result.backtest.calibratedDecisions[0].adopt, true)
+})
+
+test('held-out backtest cannot also train its calibrated forecast', () => {
+  const data = evidence()
+  data.backtest.report = structuredClone(data.calibration.reports[0])
+  data.backtest.expectedReportHash = retirementEvidenceHash(data.backtest.report)
+  const result = originalAcceptance(benchmark(), data.calibration, data.backtest)
+  assert.equal(result.accepted, false)
+  assert.equal(result.shortHorizonBacktestPassed, false)
+  assert.equal(result.backtest.reason, 'backtest-overlaps-calibration')
 })
