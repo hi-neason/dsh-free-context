@@ -241,3 +241,16 @@ test('deterministic preparation rejects structured input before storage and pric
   const report = admitted.events.find(item => item.event === 'free-context/experiment').record
   assert.equal(report.callCostUpperEstimate, (Buffer.byteLength(JSON.stringify(admitted.calls[0].messages)) + 100) / 1e6)
 })
+
+test('simultaneous experiment consumers attribute one paid call and keep originating usage', async () => {
+  const { handler, calls, events, saves } = setup()
+  const exec = execution()
+  const outcomes = await Promise.all([handler(exec, result(), async () => ({ kind: 'accept' })), handler({ ...exec, callId: 'call-2' }, result(), async () => ({ kind: 'accept' }))])
+  assert.ok(outcomes.every(outcome => outcome.content))
+  assert.equal(calls.length, 1)
+  const reports = events.filter(item => item.event === 'free-context/experiment').map(item => item.record)
+  assert.equal(reports.filter(report => report.callUsage).length, 1)
+  assert.equal(reports.filter(report => report.estimatedCost === 0).length, 1)
+  const manifests = saves.filter(save => save.content.startsWith('{"version":1')).map(save => JSON.parse(save.content))
+  assert.ok(manifests.every(manifest => manifest.originUsage.inputTokens === 100))
+})

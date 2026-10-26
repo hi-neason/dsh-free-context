@@ -274,3 +274,119 @@ test('preparation is pure, opaque, and exposes actual serialized prompt bytes', 
   await select.execute(prepared)
   assert.equal(prepared.requestBytes, Buffer.byteLength(JSON.stringify(llm.calls[0].messages)))
 })
+
+test('concurrent identical calls share usage once and cancellation is consumer-local', async () => {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const base = runtime()
+  const llm = { calls: [], stream(request) { this.calls.push(request); return (async function* () { await gate; yield* base.stream(request) })() } }
+  const select = createTextSelector(config(llm))
+  const session = {}
+  const controller = new AbortController()
+  const first = select({ kind: 'prose', text: source, session, signal: controller.signal })
+  const second = select({ kind: 'prose', text: source, session })
+  controller.abort()
+  assert.equal((await first).reason, 'aborted')
+  assert.equal(llm.calls[0].signal.aborted, false)
+  release()
+  const result = await second
+  assert.equal(result.status, 'selected')
+  assert.deepEqual(result.callUsage, usage)
+  assert.equal(llm.calls.length, 1)
+  const other = createTextSelector(config(runtime()))
+  const results = await Promise.all([other({ kind: 'prose', text: source, session }), other({ kind: 'prose', text: source, session })])
+  assert.equal(results.filter(result => result.callUsage).length, 1)
+  assert.ok(results.every(result => result.usageComplete && result.originUsage.inputTokens === 100))
+})
+
+test('in-flight limits, last-consumer abort, query/session isolation and missing usage stay fail-closed', async () => {
+  const calls = []
+  const llm = { stream(request) { calls.push(request); return { [Symbol.asyncIterator]() { return this }, next: () => new Promise(() => {}) } } }
+  const select = createTextSelector({ ...config(llm), maxInFlight: 2, selectionMode: 'query-dependent', maxQueryBytes: 100 })
+  const session = {}
+  const a = new AbortController()
+  const b = new AbortController()
+  const first = select({ kind: 'prose', text: source, session, query: 'a', signal: a.signal })
+  const second = select({ kind: 'prose', text: source, session, query: 'b', signal: b.signal })
+  assert.equal(calls.length, 2)
+  assert.equal((await select({ kind: 'prose', text: source, session: {}, query: 'a' })).reason, 'in-flight-budget')
+  a.abort(); b.abort()
+  assert.equal((await first).llmCalled, true)
+  assert.equal((await second).reason, 'aborted')
+  assert.ok(calls.every(call => call.signal.aborted))
+  const incomplete = createTextSelector(config(runtime(undefined, { usage: false })))
+  const results = await Promise.all([incomplete({ kind: 'prose', text: source, session }), incomplete({ kind: 'prose', text: source, session })])
+  assert.ok(results.every(result => !result.usageComplete))
+})
+
+test('abort after settlement cannot invalidate shared result or cached provenance', async () => {
+  const llm = runtime()
+  const select = createTextSelector(config(llm))
+  const session = {}
+  const controller = new AbortController()
+  const results = await Promise.all([select({ kind: 'prose', text: source, session, signal: controller.signal }), select({ kind: 'prose', text: source, session })])
+  controller.abort()
+  assert.ok(results.every(result => result.status === 'selected'))
+  assert.equal(results.filter(result => result.callUsage).length, 1)
+  const cached = await select({ kind: 'prose', text: source, session })
+  assert.equal(cached.cacheHit, true)
+  assert.deepEqual(cached.originUsage, usage)
+  assert.equal(llm.calls.length, 1)
+})
+
+test('timed-out adapters retain backend slots until pending next and return settle', async () => {
+  let calls = 0
+  let releaseNext
+  let releaseReturn
+  const llm = { stream() {
+    calls++
+    return { [Symbol.asyncIterator]() { return this }, next: () => new Promise(resolve => { releaseNext = resolve }), return: () => new Promise(resolve => { releaseReturn = resolve }) }
+  } }
+  const select = createTextSelector({ ...config(llm), maxInFlight: 1, timeoutMs: 5 })
+  assert.equal((await select({ kind: 'prose', text: source })).reason, 'timeout')
+  assert.equal((await select({ kind: 'prose', text: source })).reason, 'in-flight-budget')
+  assert.equal(calls, 1)
+  releaseNext({ done: true })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal((await select({ kind: 'prose', text: source })).reason, 'in-flight-budget')
+  releaseReturn({ done: true })
+  await new Promise(resolve => setImmediate(resolve))
+  const resumed = select({ kind: 'prose', text: source })
+  assert.equal(calls, 2)
+  releaseNext({ done: true })
+  await resumed
+})
+
+test('a blocked backend slot does not prevent completed cache reuse', async () => {
+  const base = runtime()
+  let blocked = false
+  const llm = { stream(request) { return blocked ? { [Symbol.asyncIterator]() { return this }, next: () => new Promise(() => {}), return: () => new Promise(() => {}) } : base.stream(request) } }
+  const select = createTextSelector({ ...config(llm), maxInFlight: 1, timeoutMs: 5 })
+  const session = {}
+  await select({ kind: 'prose', text: source, session })
+  blocked = true
+  assert.equal((await select({ kind: 'prose', text: source + ' different', session })).reason, 'timeout')
+  const cached = await select({ kind: 'prose', text: source, session })
+  assert.equal(cached.cacheHit, true)
+  assert.equal(cached.llmCalled, false)
+})
+
+test('repeated consumer abort cannot create unlimited uncooperative streams', async () => {
+  let calls = 0
+  const llm = { stream() { calls++; return { [Symbol.asyncIterator]() { return this }, next: () => new Promise(() => {}), return: () => new Promise(() => {}) } } }
+  const select = createTextSelector({ ...config(llm), maxInFlight: 1 })
+  for (let index = 0; index < 5; index++) {
+    const controller = new AbortController()
+    const pending = select({ kind: 'prose', text: source, signal: controller.signal })
+    controller.abort()
+    assert.equal((await pending).reason, index === 0 ? 'aborted' : 'in-flight-budget')
+  }
+  assert.equal(calls, 1)
+})
+
+test('normally completed streams release slots without needing iterator return', async () => {
+  const llm = runtime()
+  const select = createTextSelector({ ...config(llm), maxInFlight: 1 })
+  for (let index = 0; index < 5; index++) assert.equal((await select({ kind: 'prose', text: source })).status, 'selected')
+  assert.equal(llm.calls.length, 5)
+})

@@ -79,7 +79,7 @@ export function apply(ctx, input) {
       const originalReference = tracking.record(exec, originalReceipt, 'original')
       reason = 'selection-failed'
       selection = await select.execute(prepared, { session: exec.agent?.session, signal: exec.signal })
-      estimatedCost = selection.cacheHit ? 0 : callCost(selection.callUsage, pricing)
+      estimatedCost = (selection.cacheHit || selection.shared) ? 0 : callCost(selection.callUsage, pricing)
       if (!queryIsCurrent()) { reason = 'query-changed'; return undefined }
       if (selection.status !== 'selected') { reason = selection.reason; return undefined }
       if (!selection.usageComplete || estimatedCost === undefined || callCost(selection.originUsage, pricing) === undefined) { reason = 'missing-priced-usage'; return undefined }
@@ -88,7 +88,7 @@ export function apply(ctx, input) {
       const manifest = JSON.stringify({ version: 1, policy: selection.strategy, sourceHash: selection.sourceHash, queryHash: selection.queryHash,
         originalReceipt, selectedSpans: selection.spans.map(({ id, start, end, startLine, endLine, guards }) => ({ id, start, end, startLine, endLine, guards })),
         budgets: { maxQueryBytes: config.maxQueryBytes, maxInputBytes: config.maxInputBytes, maxPromptBytes: config.maxPromptBytes, maxOutputBytes: config.maxOutputBytes, maxOutputTokens: config.maxOutputTokens, timeoutMs: config.timeoutMs },
-        audit: selection.audit, cacheHit: selection.cacheHit, callUsage: selection.callUsage,
+        audit: selection.audit, cacheHit: selection.cacheHit, shared: selection.shared, callUsage: selection.callUsage,
         originUsage: selection.originUsage, currency: pricing.currency, estimatedCost,
       })
       const manifestReceipt = await archiveOriginal(store, exec, manifest, { maxBytes: config.maxArtifactBytes })

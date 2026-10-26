@@ -65,6 +65,10 @@ export function createTextSelector(options) {
   const configurationKey = JSON.stringify({ strategy, provider, model, ...config, maxQueryBytes, protectedTerms })
   const sessions = new WeakMap()
   const preparations = new WeakMap()
+  const pendingSessions = new WeakMap()
+  const maxInFlight = options.maxInFlight ?? 4
+  if (!Number.isSafeInteger(maxInFlight) || maxInFlight < 1) throw new TypeError('maxInFlight must be positive')
+  let active = 0
 
   function prepare({ kind, text, signal, query } = {}) {
     const started = performance.now()
@@ -113,7 +117,7 @@ export function createTextSelector(options) {
     return token
   }
 
-  async function run(data, session, signal) {
+  async function run(data, session, signal, accounting) {
     const started = performance.now()
     let usage
     let llmCalled = false
@@ -139,11 +143,13 @@ export function createTextSelector(options) {
     const onInternalAbort = () => rejectAbort(new Error('cancelled'))
     controller.signal.addEventListener('abort', onInternalAbort, { once: true })
     let iterator
+    let pendingNext
     let complete = false
     try {
       if (signal?.aborted) controller.abort()
       if (controller.signal.aborted) return decline('aborted')
       llmCalled = true
+      accounting.llmCalled = true
       iterator = llm.stream({ provider, model, messages, maxTokens: config.maxOutputTokens, signal: controller.signal })[Symbol.asyncIterator]()
       const blocks = new Map()
       let output = ''
@@ -151,7 +157,9 @@ export function createTextSelector(options) {
       let finished = false
       let sawUsage = false
       while (true) {
-        const item = await Promise.race([iterator.next(), aborted])
+        pendingNext = Promise.resolve(iterator.next())
+        const item = await Promise.race([pendingNext, aborted])
+        pendingNext = undefined
         if (controller.signal.aborted) return decline(timedOut ? 'timeout' : 'aborted')
         if (item.done) { complete = true; break }
         const chunk = item.value
@@ -188,6 +196,7 @@ export function createTextSelector(options) {
           if (sawUsage) return decline('invalid-stream')
           sawUsage = true
           usage = validUsage(chunk.usage)
+          accounting.callUsage = usage
           if (!usage) return decline('invalid-usage')
           if (usage.outputTokens > config.maxOutputTokens) return decline('output-token-budget')
         } else if (chunk.type === 'finish') {
@@ -232,8 +241,10 @@ export function createTextSelector(options) {
       signal?.removeEventListener('abort', onAbort)
       controller.signal.removeEventListener('abort', onInternalAbort)
       controller.abort()
-      // An uncooperative adapter must not block cancellation waiting for return().
-      if (!complete && iterator?.return) Promise.resolve().then(() => iterator.return()).catch(() => {})
+      // Release callers immediately, but retain the backend slot until both
+      // outstanding adapter work and cleanup settle. Abort is not proof of release.
+      const cleanup = !complete && iterator?.return ? Promise.resolve().then(() => iterator.return()) : undefined
+      accounting.settled = Promise.allSettled([pendingNext, cleanup])
     }
   }
 
@@ -242,9 +253,45 @@ export function createTextSelector(options) {
     const declined = reason => ({ status: 'declined', reason, cacheHit: false, llmCalled: false, usageComplete: false, elapsedMs: 0 })
     if (!data) return Promise.resolve(declined('invalid-preparation'))
     if (signal?.aborted) return Promise.resolve(declined('aborted'))
-    return run(data, session, signal)
+    const isolated = session !== null && typeof session === 'object'
+    if (isolated && sessions.get(session)?.has(data.cacheKey)) return run(data, session, signal, {})
+    let pending = isolated ? pendingSessions.get(session) : undefined
+    if (!pending && isolated) { pending = new Map(); pendingSessions.set(session, pending) }
+    let entry = pending?.get(data.cacheKey)
+    if (!entry) {
+      if (active >= maxInFlight) return Promise.resolve(declined('in-flight-budget'))
+      active++
+      entry = { controller: new AbortController(), consumers: new Set(), accounting: { llmCalled: false } }
+      pending?.set(data.cacheKey, entry)
+      // Start immediately; every consumer still subscribes before the promise settles.
+      entry.promise = run(data, session, entry.controller.signal, entry.accounting)
+      entry.promise.then(result => {
+        entry.accounting.settled.then(() => { active-- })
+        if (pending?.get(data.cacheKey) === entry) pending.delete(data.cacheKey)
+        let charged = false
+        for (const consumer of entry.consumers) {
+          const shared = charged && result.llmCalled
+          consumer.finish(shared ? { ...result, callUsage: undefined, llmCalled: false, shared: true } : result)
+          charged = true
+        }
+        entry.consumers.clear()
+      })
+    }
+    return new Promise(resolve => {
+      const consumer = { finish(result) { signal?.removeEventListener('abort', abort); resolve(result) } }
+      const abort = () => {
+        entry.consumers.delete(consumer)
+        consumer.finish({ ...declined('aborted'), ...(!entry.consumers.size ? entry.accounting : {}), usageComplete: !entry.consumers.size && entry.accounting.callUsage !== undefined })
+        if (!entry.consumers.size) {
+          if (pending?.get(data.cacheKey) === entry) pending.delete(data.cacheKey)
+          entry.controller.abort()
+        }
+      }
+      entry.consumers.add(consumer)
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) abort()
+    })
   }
-
   async function select(input = {}) {
     const token = prepare(input)
     return token.status === 'prepared' ? execute(token, input) : token
