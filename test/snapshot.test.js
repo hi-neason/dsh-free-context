@@ -98,3 +98,33 @@ test('call, tool and session changes during save cannot misattribute a receipt',
     await assert.rejects(archiveOriginal(backend(() => mutate(exec)), exec, 'x'), /identity changed/)
   }
 })
+
+test('abort stops waiting for uncooperative storage and late success cannot yield a receipt', async () => {
+  const controller = new AbortController()
+  let release, started
+  const began = new Promise(resolve => { started = resolve })
+  const store = { saveText() { started(); return new Promise(resolve => { release = resolve }) } }
+  const operation = archiveOriginal(store, { ...execution(), signal: controller.signal }, 'x')
+  await began
+  controller.abort()
+  const outcome = await Promise.race([operation.then(() => 'receipt', error => error.name),
+    new Promise(resolve => setTimeout(() => resolve('still-waiting'), 50))])
+  release({ locator: 'late', retrievalHint: 'read', bytes: 1 })
+  assert.equal(outcome, 'AbortError')
+})
+
+test('storage deadlines and pending-save limits bound uncooperative backend work', async () => {
+  let calls = 0
+  const releases = []
+  const store = { saveText() { calls++; return new Promise((resolve, reject) => releases.push({ resolve, reject })) } }
+  const one = archiveOriginal(store, execution(), 'x', { timeoutMs: 5, maxPendingSaves: 1 })
+  await assert.rejects(one, { name: 'TimeoutError' })
+  await assert.rejects(archiveOriginal(store, execution(), 'x', { maxPendingSaves: 1 }), /pending/i)
+  assert.equal(calls, 1)
+  releases[0].reject(new Error('late storage failure'))
+  await new Promise(resolve => setImmediate(resolve))
+  const next = archiveOriginal(store, execution(), 'x', { maxPendingSaves: 1 })
+  await new Promise(resolve => setImmediate(resolve))
+  releases[1].resolve({ locator: 'ok', retrievalHint: 'read', bytes: 1 })
+  assert.equal((await next).locator, 'ok')
+})

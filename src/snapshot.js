@@ -1,4 +1,9 @@
 import { createHash } from 'node:crypto'
+import { waitForBoundary } from './async-boundary.js'
+
+// A timeout releases the caller, not the backend. Count real unfinished saves
+// until they settle so repeated cancellation cannot start unlimited writes.
+const pendingSaves = new WeakMap()
 
 function requireText(value, name) {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -14,9 +19,11 @@ function requireText(value, name) {
  * @param {{saveText: Function}} store
  * @param {object} exec
  * @param {string} text
- * @param {{maxBytes?: number}} [options]
+ * @param {{maxBytes?: number, timeoutMs?: number, maxPendingSaves?: number}} [options]
  */
-export async function archiveOriginal(store, exec, text, { maxBytes = 1024 * 1024 } = {}) {
+export async function archiveOriginal(store, exec, text, {
+  maxBytes = 1024 * 1024, timeoutMs = 10000, maxPendingSaves = 4,
+} = {}) {
   const sessionId = requireText(exec?.agent?.session?.header?.id, 'sessionId')
   const callId = requireText(exec?.callId, 'callId')
   const toolName = requireText(exec?.name, 'toolName')
@@ -24,17 +31,29 @@ export async function archiveOriginal(store, exec, text, { maxBytes = 1024 * 102
   signal?.throwIfAborted()
   if (typeof store?.saveText !== 'function') throw new TypeError('spillStore.saveText is required')
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new RangeError('Invalid maxBytes')
+  if (!Number.isSafeInteger(maxPendingSaves) || maxPendingSaves < 1) throw new RangeError('Invalid maxPendingSaves')
   // Unpaired surrogates cannot be saved verbatim as UTF-8.
   if (typeof text !== 'string' || !text.isWellFormed()) throw new TypeError('Expected well-formed text')
   const bytes = Buffer.byteLength(text, 'utf8')
   if (bytes > maxBytes) throw new RangeError('Original exceeds snapshot byte limit')
   const sha256 = createHash('sha256').update(text, 'utf8').digest('hex')
-  const saved = await store.saveText({
-    owner: { sessionId },
-    source: { kind: 'tool', toolName, callId, label: 'result' },
-    suggestedName: 'free-context-original.txt',
-    content: text,
-  })
+  const saved = await waitForBoundary(() => {
+    const count = pendingSaves.get(store) ?? 0
+    if (count >= maxPendingSaves) throw new Error('Snapshot pending save limit reached')
+    pendingSaves.set(store, count + 1)
+    const release = () => {
+      const remaining = pendingSaves.get(store) - 1
+      if (remaining) pendingSaves.set(store, remaining)
+      else pendingSaves.delete(store)
+    }
+    try {
+      return Promise.resolve(store.saveText({
+        owner: { sessionId },
+        source: { kind: 'tool', toolName, callId, label: 'result' },
+        suggestedName: 'free-context-original.txt', content: text,
+      })).finally(release)
+    } catch (error) { release(); throw error }
+  }, { signal, timeoutMs })
   signal?.throwIfAborted()
   exec.signal?.throwIfAborted()
   if (exec.agent?.session?.header?.id !== sessionId || exec.callId !== callId || exec.name !== toolName) {
