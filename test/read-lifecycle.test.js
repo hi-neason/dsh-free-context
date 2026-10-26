@@ -134,3 +134,18 @@ test('installed listeners preserve result identity and swallow malformed observa
   assert.equal(handlers.size, 0)
   assert.equal(installed.query(session, 'a'), undefined)
 })
+
+test('repeated covering reads flatten predecessors to the latest independently verified coverage', () => {
+  const tracker = createReadTracker()
+  const session = {}
+  for (const id of ['a', 'b', 'c']) read(tracker, session, id, 1, ['one', 'two'])
+  assert.equal(tracker.query(session, 'a').supersededBy, 'c')
+  assert.equal(tracker.query(session, 'b').supersededBy, 'c')
+  read(tracker, session, 'partial', 1, ['one'])
+  assert.equal(tracker.query(session, 'a').supersededBy, 'c')
+  read(tracker, session, 'different', 1, ['changed', 'two'])
+  assert.equal(tracker.query(session, 'a').supersededBy, 'c')
+  read(tracker, session, 'changed-version', 1, ['one', 'two'], 'v2')
+  assert.equal(tracker.query(session, 'a').status, 'stale')
+  assert.equal(tracker.query(session, 'a').supersededBy, undefined)
+})

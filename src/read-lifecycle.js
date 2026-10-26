@@ -85,7 +85,7 @@ export function createReadTracker({ maxEntriesPerSession = 256 } = {}) {
       hashes: window.hashes, contentHash }
     if (current.status === 'active' && current.end >= current.start) {
       for (const previous of data.records.values()) {
-        if (previous.status !== 'active' || previous.targetKey !== current.targetKey || previous.version !== current.version ||
+        if (!['active', 'superseded'].includes(previous.status) || previous.targetKey !== current.targetKey || previous.version !== current.version ||
           previous.end < previous.start || current.start > previous.start || current.end < previous.end) continue
         // Same line numbers alone do not prove coverage when per-line text caps
         // differ. Require identical returned text for each overlapping old line.
