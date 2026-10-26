@@ -5,6 +5,7 @@ import { createTextSelector } from './text-selection.js'
 import { createPostExecuteHandler } from './pipeline.js'
 import { measureContent, reportDecision } from './diagnostics.js'
 import { archiveOriginal, formatSnapshotReference } from './snapshot.js'
+import { createTrialBudgets } from './trial-budget.js'
 import { assessNetBenefit } from './economics.js'
 
 export const name = 'dsh-free-context-experiments'
@@ -32,6 +33,8 @@ export function apply(ctx, input) {
   const config = parseExperimentConfig(input)
   if (config.mode === 'off' || !config.tools.length) return
   const tracking = getSnapshotTracking(ctx)
+  const trial = config.admission === 'measured-trial'
+  const trialBudgets = createTrialBudgets(config)
   const select = createTextSelector({ ...config, llm: ctx.llm })
   const warn = message => ctx.logger.warn(message)
   const transform = async (content, exec) => {
@@ -42,13 +45,18 @@ export function apply(ctx, input) {
     let query
     let queryProvider
     let diagnosticsComplete = false
+    let trialBudget
     try {
       if (content.length !== 1 || content[0].type !== 'text' || typeof content[0].text !== 'string') return undefined
       const original = measureContent(content)
       if (original.bytes > config.maxInputBytes) { reason = 'input-byte-budget'; return undefined }
+      if (trial) {
+        trialBudget = trialBudgets(exec.agent?.session)
+        if (!trialBudget) { reason = 'trial-session-required'; return undefined }
+      }
       const pricing = config.pricing
       if (!pricing?.currency || ['uncachedInputPerMillion', 'cacheReadPerMillion', 'outputPerMillion'].some(key => pricing[key] === undefined)) { reason = 'missing-pricing'; return undefined }
-      if (['minimumFutureRequests', 'expectedRecoveryCost', 'safetyMargin', 'maxCallCost', 'futureCacheReadPerMillion'].some(key => config[key] === undefined)) { reason = 'missing-economic-assumptions'; return undefined }
+      if (!trial && ['minimumFutureRequests', 'expectedRecoveryCost', 'safetyMargin', 'maxCallCost', 'futureCacheReadPerMillion'].some(key => config[key] === undefined)) { reason = 'missing-economic-assumptions'; return undefined }
       const economics = (candidateTokens, compressionCost) => assessNetBenefit({
         originalTokens: Math.min(original.estimatedTokens, config.comparatorTokenCap ?? Infinity),
         candidateTokens: Math.min(candidateTokens, config.comparatorTokenCap ?? Infinity), invalidatedPrefixTokens: 0,
@@ -73,21 +81,30 @@ export function apply(ctx, input) {
       const cachedSelection = select.cached(prepared, { session: exec.agent?.session, signal: exec.signal })
       callCostUpperEstimate = cachedSelection ? 0 : (prepared.requestBytes * Math.max(pricing.uncachedInputPerMillion, pricing.cacheReadPerMillion, pricing.cacheWritePerMillion ?? pricing.uncachedInputPerMillion) + config.maxOutputTokens * pricing.outputPerMillion) / 1e6
       if (!Number.isFinite(callCostUpperEstimate) || callCostUpperEstimate > config.maxCallCost) { reason = 'call-cost-budget'; return undefined }
-      if (!economics(0, callCostUpperEstimate).adopt) { reason = 'no-predicted-benefit-before-call'; return undefined }
+      if (!trial && !economics(0, callCostUpperEstimate).adopt) { reason = 'no-predicted-benefit-before-call'; return undefined }
       const queryIsCurrent = () => !queryProvider || (ctx.get('freeContextQuery') === queryProvider && readQuery(queryProvider, exec) === query)
       const store = ctx.get('spillStore')
       reason = 'snapshot-failed'
       const originalReceipt = await archiveOriginal(store, exec, content[0].text, { maxBytes: config.maxInputBytes })
       const originalReference = tracking.record(exec, originalReceipt, 'original')
       reason = 'selection-failed'
-      selection = cachedSelection ?? await select.execute(prepared, { session: exec.agent?.session, signal: exec.signal })
-      estimatedCost = (selection.cacheHit || selection.shared) ? 0 : callCost(selection.callUsage, pricing)
+      let reservation
+      if (trial && !cachedSelection) {
+        reservation = trialBudget.reserve(callCostUpperEstimate)
+        if (reservation.reason) { reason = reservation.reason; return undefined }
+      }
+      try {
+        selection = cachedSelection ?? await select.execute(prepared, { session: exec.agent?.session, signal: exec.signal })
+        estimatedCost = (selection.cacheHit || selection.shared) ? 0 : callCost(selection.callUsage, pricing)
+      } finally {
+        reservation?.settle(selection, estimatedCost)
+      }
       if (!queryIsCurrent()) { reason = 'query-changed'; return undefined }
       if (selection.status !== 'selected') { reason = selection.reason; return undefined }
       if (!selection.usageComplete || estimatedCost === undefined || callCost(selection.originUsage, pricing) === undefined) { reason = 'missing-priced-usage'; return undefined }
       if (estimatedCost > config.maxCallCost) { reason = 'actual-call-cost-budget'; return undefined }
       reason = 'manifest-failed'
-      const manifest = JSON.stringify({ version: 1, policy: selection.strategy, sourceHash: selection.sourceHash, queryHash: selection.queryHash,
+      const manifest = JSON.stringify({ version: 1, admission: config.admission, ...(trial ? { predictedSavings: null, trialBudget: trialBudget.snapshot() } : {}), policy: selection.strategy, sourceHash: selection.sourceHash, queryHash: selection.queryHash,
         originalReceipt, selectedSpans: selection.spans.map(({ id, start, end, startLine, endLine, guards }) => ({ id, start, end, startLine, endLine, guards })),
         budgets: { maxQueryBytes: config.maxQueryBytes, maxInputBytes: config.maxInputBytes, maxPromptBytes: config.maxPromptBytes, maxOutputBytes: config.maxOutputBytes, maxOutputTokens: config.maxOutputTokens, timeoutMs: config.timeoutMs },
         audit: selection.audit, cacheHit: selection.cacheHit, shared: selection.shared, callUsage: selection.callUsage,
@@ -103,7 +120,7 @@ export function apply(ctx, input) {
       if (exec.signal?.aborted) { reason = 'aborted'; return undefined }
       if (!queryIsCurrent()) { reason = 'query-changed'; return undefined }
       if (output.bytes >= original.bytes || output.estimatedTokens >= original.estimatedTokens || original.estimatedTokens - output.estimatedTokens < config.minSavingsTokens) { reason = 'insufficient-size-savings'; return undefined }
-      if (!economics(output.estimatedTokens, estimatedCost).adopt) { reason = 'insufficient-net-benefit'; return undefined }
+      if (!trial && !economics(output.estimatedTokens, estimatedCost).adopt) { reason = 'insufficient-net-benefit'; return undefined }
       reason = config.mode === 'apply' ? 'selected' : 'observed'
       return { content: replacement, strategy: selection.strategy, lossy: true, validate: () => diagnosticsComplete && queryIsCurrent(), snapshots: [originalReference, auditReference].filter(Boolean) }
     } catch {
@@ -112,8 +129,8 @@ export function apply(ctx, input) {
     } finally {
       diagnosticsComplete = await reportDecision(record => ctx.parallel('free-context/experiment', record), warn, {
         tool: exec.name, callId: exec.callId, sessionId: exec.agent?.session?.header?.id,
-        mode: config.mode, reason, queryHash: selection?.queryHash, cacheHit: selection?.cacheHit ?? false, llmCalled: selection?.llmCalled ?? false,
-        callUsage: selection?.callUsage, estimatedCost, comparatorTokenCap: config.comparatorTokenCap, futureCacheReadPerMillion: config.futureCacheReadPerMillion, currency: config.pricing?.currency, callCostUpperEstimate,
+        mode: config.mode, admission: config.admission, ...(trial ? { predictedSavings: null, trialBudget: trialBudget?.snapshot() } : {}), reason, queryHash: selection?.queryHash, cacheHit: selection?.cacheHit ?? false, llmCalled: selection?.llmCalled ?? false,
+        callUsage: selection?.callUsage, estimatedCost, comparatorTokenCap: config.comparatorTokenCap, futureCacheReadPerMillion: trial ? undefined : config.futureCacheReadPerMillion, currency: config.pricing?.currency, callCostUpperEstimate,
       }, { signal: exec.signal })
     }
   }

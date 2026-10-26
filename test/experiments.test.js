@@ -29,13 +29,13 @@ function setup(overrides = {}, behavior = {}) {
     parallel: async (event, record) => { if (['free-context/experiment', 'free-context/decision'].includes(event)) events.push({ event, record }); await behavior.onReport?.(event) },
     llm: { async * stream(request) {
       calls.push(request)
-      behavior.onRequest?.()
+      await behavior.onRequest?.()
       if (behavior.cancel) behavior.cancel.abort()
       const response = behavior.responseFor ? behavior.responseFor(request) : behavior.invalidResponse ? '{"selectedIds":[]}' : '{"selectedIds":["p1"]}'
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: response }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: response } }
-      if (!behavior.noUsage) yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 50, ...(behavior.write ? { cacheWriteTokens: 20 } : {}) } }
+      if (!behavior.noUsage) yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 50, ...(behavior.write ? { cacheWriteTokens: 20 } : {}), ...behavior.usage } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     } },
   }
@@ -307,4 +307,120 @@ test('eviction while archiving a captured cache hit cannot turn it into a new pa
   assert.equal(record.llmCalled, false)
   assert.equal(record.estimatedCost, 0)
   assert.equal(f.calls.length, 2)
+})
+
+const trialSettings = overrides => ({ admission: 'measured-trial', maxCalls: 2, maxTotalCost: 1,
+  minimumFutureRequests: undefined, futureCacheReadPerMillion: undefined, expectedRecoveryCost: undefined, safetyMargin: undefined,
+  pricing: { currency: 'USD', uncachedInputPerMillion: 1, cacheReadPerMillion: 0.1, cacheWritePerMillion: 1, outputPerMillion: 1 }, ...overrides })
+const reports = f => f.events.filter(event => event.event === 'free-context/experiment').map(event => event.record)
+
+test('measured trial is explicit, requires finite USD limits and complete auxiliary prices', () => {
+  assert.equal(parseExperimentConfig(settings()).admission, 'forecast')
+  for (const bad of [{ admission: 'trial' }, { maxCalls: undefined }, { maxCalls: 0 }, { maxCalls: 1.5 },
+    { maxTotalCost: undefined }, { maxTotalCost: Infinity }, { maxCallCost: undefined },
+    { pricing: { currency: 'USD', uncachedInputPerMillion: 1, cacheReadPerMillion: 1, outputPerMillion: 1 } },
+    { pricing: { currency: 'EUR', uncachedInputPerMillion: 1, cacheReadPerMillion: 1, cacheWritePerMillion: 1, outputPerMillion: 1 } }]) {
+    assert.throws(() => parseExperimentConfig(settings(trialSettings(bad))))
+  }
+})
+
+test('trial skips only profit forecasts, records N/A and permits completed cached evidence after call budget', async () => {
+  const f = setup(trialSettings({ maxCalls: 1, comparatorTokenCap: 1 }))
+  const exec = execution()
+  assert.ok((await f.handler(exec, result(), async () => ({ kind: 'accept' }))).content)
+  assert.ok((await f.handler(exec, result(), async () => ({ kind: 'accept' }))).content)
+  assert.equal(f.calls.length, 1)
+  assert.equal(reports(f)[0].admission, 'measured-trial')
+  assert.equal(reports(f)[0].predictedSavings, null)
+  assert.equal(reports(f)[1].trialBudget.calls, 1)
+  assert.equal(JSON.parse(f.saves[1].content).admission, 'measured-trial')
+  const changed = result(); changed.content[0].text += '\n\nDifferent evidence.'
+  await f.handler(exec, changed, async () => ({ kind: 'accept' }))
+  assert.equal(reports(f).at(-1).reason, 'trial-call-budget')
+  assert.equal(f.calls.length, 1)
+})
+
+test('trial reserves finite money and calls atomically across concurrent different requests', async () => {
+  for (const limits of [{ maxCalls: 1 }, { maxTotalCost: 0.03 }]) {
+    let release
+    const blocked = new Promise(resolve => { release = resolve })
+    let started
+    const ready = new Promise(resolve => { started = resolve })
+    const f = setup(trialSettings(limits), { async onRequest() { started(); await blocked } })
+    const exec = execution()
+    const first = f.handler(exec, result(), async () => ({ kind: 'accept' }))
+    await ready
+    const changed = result(); changed.content[0].text += '\n\nDifferent evidence.'
+    await f.handler({ ...exec, callId: 'concurrent' }, changed, async () => ({ kind: 'accept' }))
+    assert.equal(f.calls.length, 1)
+    assert.match(reports(f).at(-1).reason, /^trial-(call|cost)-budget$/)
+    release(); await first
+  }
+})
+
+test('unknown fees, cancellation and actual overshoot retain reservation or charge and seal fresh trial calls', async () => {
+  for (const behavior of [{ noUsage: true }, { cancel: new AbortController() }, { invalidResponse: true }, { usage: { inputTokens: 2000000 } }]) {
+    const f = setup(trialSettings(), behavior)
+    const exec = execution()
+    if (behavior.cancel) exec.signal = behavior.cancel.signal
+    await f.handler(exec, result(), async () => ({ kind: 'accept' }))
+    const first = reports(f)[0]
+    assert.equal(first.trialBudget.sealed, true)
+    assert.equal(first.trialBudget.calls, 1)
+    assert.ok(first.trialBudget.committedCost > 0)
+    const changed = result(); changed.content[0].text += '\n\nDifferent evidence.'
+    await f.handler({ ...exec, signal: new AbortController().signal }, changed, async () => ({ kind: 'accept' }))
+    assert.equal(f.calls.length, 1)
+    assert.equal(reports(f).at(-1).reason, 'trial-budget-sealed')
+  }
+})
+
+test('trial budget requires session identity, is isolated, and does not charge archive failure or pre-abort', async () => {
+  const f = setup(trialSettings({ maxCalls: 1 }))
+  await f.handler({ ...execution(), agent: undefined }, result(), async () => ({ kind: 'accept' }))
+  assert.equal(f.calls.length, 0)
+  assert.equal(reports(f).at(-1).reason, 'trial-session-required')
+  await f.handler(execution(), result(), async () => ({ kind: 'accept' }))
+  await f.handler(execution(), result(), async () => ({ kind: 'accept' }))
+  assert.equal(f.calls.length, 2)
+  const behavior = { storageFailure: true }
+  const failed = setup(trialSettings({ maxCalls: 1 }), behavior)
+  const exec = execution()
+  await failed.handler(exec, result(), async () => ({ kind: 'accept' }))
+  behavior.storageFailure = false
+  assert.ok((await failed.handler(exec, result(), async () => ({ kind: 'accept' }))).content)
+  assert.equal(failed.calls.length, 1)
+})
+
+test('trial shares one paid call, refunds duplicate reservation and keeps unknown fees sealed after cache reuse', async () => {
+  const f = setup(trialSettings())
+  const exec = execution()
+  const outcomes = await Promise.all([f.handler(exec, result(), async () => ({ kind: 'accept' })), f.handler({ ...exec, callId: 'shared' }, result(), async () => ({ kind: 'accept' }))])
+  assert.ok(outcomes.every(outcome => outcome.content))
+  assert.equal(f.calls.length, 1)
+  await f.handler(exec, result(), async () => ({ kind: 'accept' }))
+  assert.equal(reports(f).at(-1).trialBudget.calls, 1)
+  assert.ok(Math.abs(reports(f).at(-1).trialBudget.committedCost - 0.000115) < 1e-12)
+
+  const unknown = setup(trialSettings(), { noUsage: true })
+  await unknown.handler(exec, result(), async () => ({ kind: 'accept' }))
+  assert.equal((await unknown.handler(exec, result(), async () => ({ kind: 'accept' }))).content, undefined)
+  assert.equal(reports(unknown).at(-1).reason, 'missing-priced-usage')
+  assert.equal(reports(unknown).at(-1).trialBudget.sealed, true)
+  assert.equal(unknown.calls.length, 1)
+})
+
+test('trial refunds pre-call abort during archive and preserves size and protected-evidence gates', async () => {
+  const controller = new AbortController()
+  const f = setup(trialSettings({ maxCalls: 1 }), { onSave() { controller.abort() } })
+  const exec = execution()
+  await f.handler({ ...exec, signal: controller.signal }, result(), async () => ({ kind: 'accept' }))
+  assert.equal(f.calls.length, 0)
+  assert.equal(reports(f)[0].trialBudget.calls, 0)
+  assert.ok((await f.handler(exec, result(), async () => ({ kind: 'accept' }))).content)
+  for (const [override, expected] of [[{ minSavingsTokens: 100000 }, 'insufficient-size-savings'], [{ protectedTerms: ['Paragraph 2'] }, 'protected-paragraph-omitted']]) {
+    const guarded = setup(trialSettings(override))
+    assert.equal((await guarded.handler(execution(), result(), async () => ({ kind: 'accept' }))).content, undefined)
+    assert.equal(reports(guarded)[0].reason, expected)
+  }
 })
