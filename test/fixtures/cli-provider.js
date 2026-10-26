@@ -3,12 +3,13 @@ import assert from 'node:assert/strict'
 import { appendFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { decodeJsonRows } from '../../src/json-codec.js'
+import { decodeJsonRows, encodeJsonRows } from '../../src/json-codec.js'
 const runtime = createRequire(process.env.DSH_CLI_RUNTIME_PACKAGE)
 const { LlmAdapter } = await import(pathToFileURL(runtime.resolve('@deepseek-ai/dsh-llm')).href)
 const { defineContentToolFixture } = await import(pathToFileURL(runtime.resolve('@deepseek-ai/dsh-tools')).href)
 export const inject = ['llm', 'tools']
-export const rows = Array.from({ length: 40 }, (_, i) => ({ record_identifier: i, repeated_description_field: `value-${i}`, repeated_state_field: 'ok' }))
+const { estimateContent } = await import(pathToFileURL(runtime.resolve('@deepseek-ai/dsh-token-meter/estimate')).href)
+const rows = Array.from({ length: process.env.DSH_CLI_EXPECT_MODE === 'off' ? 3 : 70 }, (_, i) => ({ record_identifier: i, repeated_description_field: `value-${i}`, repeated_state_field: 'ok' }))
 const original = [{ type: 'text', text: JSON.stringify(rows) }]
 const record = event => appendFile(process.env.DSH_CLI_EVIDENCE, JSON.stringify(event) + '\n')
 class LocalProvider extends LlmAdapter {
@@ -36,6 +37,10 @@ class LocalProvider extends LlmAdapter {
   }
 }
 export function apply(ctx) {
+  if (process.env.DSH_CLI_EXPECT_MODE !== 'off') {
+    assert.ok(estimateContent(original) > 1200)
+    assert.ok(estimateContent([{ type: 'text', text: encodeJsonRows(original[0].text) }]) < 1200)
+  }
   ctx.llm.registerAdapter(['cli-local'], new LocalProvider())
   ctx.tools.register(defineContentToolFixture({ name: 'cli_fixture', description: 'Return fixed CLI acceptance data', parameters: {}, execute: async () => original }))
   ctx.on('tools/post-execute', async (exec, result, next) => {

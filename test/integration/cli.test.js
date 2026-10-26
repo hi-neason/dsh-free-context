@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,7 +14,7 @@ const plugin = fileURLToPath(new URL('../../src/index.js', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixtures/cli-provider.js', import.meta.url))
 const jsonLines = text => text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
 
-test('official CLI loads plugin, preserves tool value, resumes persisted history and exits with policy off', { timeout: 120000 }, async t => {
+test('official CLI composes plugin before tuned native spill, resumes persisted history and exits with policy off', { timeout: 120000 }, async t => {
   assert.equal(JSON.parse(await readFile(join(runtime, 'node_modules/@deepseek-ai/dsh/package.json'))).version, '0.2.1-rc.2')
   const directory = await mkdtemp(join(tmpdir(), 'free-context-cli-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
@@ -29,9 +29,15 @@ test('official CLI loads plugin, preserves tool value, resumes persisted history
     '- id: llm-deepseek', '  disabled: true',
     '- id: llm-deepseek-account', '  disabled: true',
     '- id: llm-pi-ai', '  disabled: true',
+    // Official Include supports append/override, not before/after anchors.
+    // Disable the shipped row and append its replacement after free-context.
+    '- id: spill-policy', '  disabled: true',
+    '- id: spill-local', '  config:', `    root: ${JSON.stringify(join(directory, 'spill'))}`,
     '- insert:', '    - id: cli-provider', `      name: ${JSON.stringify(fixture)}`,
     '    - id: free-context', `      name: ${JSON.stringify(plugin)}`, '      config:',
-    '        mode: apply', '        tools: [cli_fixture]', '        minInputBytes: 0', '',
+    '        mode: apply', '        tools: [cli_fixture]', '        minInputBytes: 0',
+    '    - id: native-spill-tuned', "      name: '@deepseek-ai/dsh-spill-policy'",
+    '      config:', '        maxInlineTokens: 1200', '',
   ].join('\n')
   await writeFile(patch, patchText)
   const evidence = join(directory, 'evidence.jsonl')
@@ -49,12 +55,16 @@ test('official CLI loads plugin, preserves tool value, resumes persisted history
   const initialEvidence = jsonLines(await readFile(evidence, 'utf8'))
   assert.equal(initialEvidence.filter(event => event.type === 'tool').length, 1)
   assert.equal(initialEvidence.find(event => event.type === 'decision').event.outcome, 'selected')
+  const spillFiles = await readdir(join(directory, 'spill'), { recursive: true }).catch(error => {
+    if (error.code === 'ENOENT') return []; throw error
+  })
+  assert.deepEqual(spillFiles, [], 'reversible compact result must not require a native archive')
   const second = await run(['--session-id', session.sessionId])
   assert.equal(second.find(event => event.type === 'session').sessionId, session.sessionId)
   const resumedEvidence = jsonLines(await readFile(evidence, 'utf8')).slice(initialEvidence.length)
   assert.equal(resumedEvidence.filter(event => event.type === 'tool').length, 0, 'resume must reuse the persisted tool result')
   assert.ok(resumedEvidence.find(event => event.type === 'request').messages.some(message => message.role === 'tool'))
-  // Restart with the policy explicitly disabled and exercise a new actual tool call.
+  // Restart with the policy disabled and exercise a short result within the same native cap.
   await writeFile(patch, patchText.replace('mode: apply', 'mode: off'))
   const beforeOff = initialEvidence.length + resumedEvidence.length
   await run([], 'off')
