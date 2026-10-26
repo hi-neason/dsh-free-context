@@ -20,6 +20,24 @@ test('runner exceptions preserve only allowlisted metadata and available account
   assert.ok(Array.isArray(result.modelCalls))
 })
 
+test('a failed later phase cannot reuse an earlier successful assistant answer', async () => {
+  const fixture = structuredClone({ ...acceptanceFixtures()[0], answer: undefined })
+  fixture.answer = acceptanceFixtures()[0].answer
+  fixture.phases = [0, 1].map(() => ({ query: fixture.query, expected: fixture.expected }))
+  let steps = 0
+  const result = await runAgentFixture(fixture, 'baseline-default', { replay: true, adapterFactory: acceptanceReplayAdapter,
+    configureContext(ctx) {
+      ctx.on('agent/pre-step', async (_payload, next) => {
+        if (++steps > 3) throw new Error('second phase failed')
+        return next()
+      })
+    } })
+  assert.equal(result.phaseResults[0].passed, true)
+  assert.equal(result.passed, false)
+  assert.equal(result.exactFacts, false)
+  assert.equal(result.phaseResults[1].passed, false)
+})
+
 test('bounded validation feedback records initial failures and extra calls without golden answers', async () => {
   const fixture = acceptanceFixtures()[0]
   const adapterFactory = options => {

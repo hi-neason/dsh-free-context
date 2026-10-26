@@ -122,7 +122,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     await mountAgentLoopTestDependencies(ctx, { workingDirectory: true, ...(fixture.ptc ? { tools: { mode: 'ptc' } } : {}), systemPrompt: { personaPrefix: '' } })
     ctx.on('llm/stream', (request, next) => (async function* () {
       const visibleToolResults = (request.messages ?? []).filter(message => message.role === 'tool').map(message => ({ callId: message.toolCallId, contentHash: contentHash(message.content) }))
-      const record = { visibleToolResults, id: modelCalls.length + 1, kind: request.tools?.length ? 'agent' : 'auxiliary', provider: request.provider, model: request.model, usage: null, finish: null }
+      const record = { visibleToolResults, id: modelCalls.length + 1, agentStep: steps, kind: request.tools?.length ? 'agent' : 'auxiliary', provider: request.provider, model: request.model, usage: null, finish: null }
       modelCalls.push(record)
       try {
         for await (const chunk of next()) {
@@ -190,14 +190,18 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       phaseIndex = index
       let prompt = `${phase.query}\nOriginal fixture path: ${source}`
       for (let correction = 0; correction <= validationFeedbackLimit; correction++) {
+        const eventBoundary = agent.session.snapshotEvents().length
         agent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }))
         await agent.whenIdle()
-        const phaseMessages = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+        const phaseEvents = agent.session.snapshotEvents().slice(eventBoundary)
+        const turnCompleted = phaseEvents.filter(event => event.type === 'turn/end').at(-1)?.data.reason.kind === 'completed'
+        const phaseMessages = phaseEvents.filter(event => event.type === 'assistant/message')
         const answer = phaseMessages.at(-1)?.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
         let actual = null
         let parsed = false
         try { actual = JSON.parse(answer); parsed = actual !== null && typeof actual === 'object' } catch {}
         const issues = []
+        if (!turnCompleted || !phaseMessages.length) issues.push('This phase did not produce a fresh answer in a completed turn.')
         if (!parsed) issues.push('Return the requested JSON object only, without prose or Markdown.')
         if (!toolCalls.some(call => call.name === (fixture.ptc ? 'run_code' : 'fixture') && !call.isError)) issues.push('Use the required fixture tool before answering.')
         if (fixture.requireReadEachPhase && !toolCalls.some(call => call.phase === index && call.name === 'read' && !call.isError)) issues.push('Read the required source in this phase before answering.')
@@ -206,7 +210,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
         if (fixture.edit && index === (fixture.phases?.length ?? 1) - 1 && !toolCalls.some(call => call.phase === index && ['edit', 'write'].includes(call.name) && !call.isError)) issues.push('Perform the requested file edit and verify it by reading the file.')
         drafts.push({ phase: index, correction, actual, exactFacts: isDeepStrictEqual(actual, phase.expected), issues })
         if (!issues.length || correction === validationFeedbackLimit || stoppedReason || steps >= maxSteps) {
-          phaseResults.push({ actual, passed: isDeepStrictEqual(actual, phase.expected) })
+          phaseResults.push({ actual, turnCompleted, freshAnswer: phaseMessages.length > 0, passed: turnCompleted && phaseMessages.length > 0 && isDeepStrictEqual(actual, phase.expected) })
           break
         }
         feedback.push({ phase: index, correction: correction + 1, issues })
@@ -229,7 +233,8 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       (!historyRetirement || retirements.some(record => record.reason === 'retired'))
     const snapshotRecoveryByPhase = phaseResults.map((_, phase) => ({ phase, recovered: toolCalls.some(call => call.phase === phase && call.readSnapshot && !call.isError) }))
     const snapshotRecovered = !snapshotRecoveryRequired || (fixture.requireSnapshot ? snapshotRecoveryByPhase.every(phase => phase.recovered) : toolCalls.some(call => call.readSnapshot && !call.isError))
-    const passed = exactFacts && requiredTools && snapshotRecovered && !stoppedReason && attempts.length === 0 && steps <= maxSteps
+    const failedTurn = events.some(event => event.type === 'turn/end' && event.data.reason.kind !== 'completed')
+    const passed = exactFacts && requiredTools && snapshotRecovered && !failedTurn && !stoppedReason && attempts.length === 0 && steps <= maxSteps
     const fileCorrect = !fixture.edit || await readFile(source, 'utf8') === fixture.editedText
     return { task: fixture.id, group, replay, passed: passed && fileCorrect, fileCorrect, exactFacts, requiredTools, snapshotRecoveryRequired, snapshotRecovered, actual, finalAnswer: text ?? null, startedAt, steps,
       drafts, feedback, correctionCount: feedback.length, attempts: attempts.length, usageComplete, modelCalls, phaseResults, experiments, snapshotRecoveryByPhase,

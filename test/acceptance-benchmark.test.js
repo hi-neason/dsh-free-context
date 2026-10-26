@@ -22,7 +22,7 @@ const pricing = { currency: 'USD', model: 'model', verifiedDate: '2026-10-26', r
 const provenance = { runtimeVersion: '0.2.1-rc.2', repositoryCommit: 'a'.repeat(40), sourceTreeHash: 'b'.repeat(64), model: 'model', cacheCondition: acceptanceCriteria.cacheCondition }
 function records(plan) {
   return plan.runs.map(run => { const usage = { inputTokens: run.group === 'plugin' ? 10 : 20, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }; return { ...run, manifestHash: plan.manifestHash, passed: true, exactFacts: true, requiredTools: true, fileCorrect: true, snapshotRecovered: true,
-    phaseResults: (plan.tasks.find(task => task.id === run.task).phases ?? [plan.tasks.find(task => task.id === run.task)]).map(phase => ({ actual: phase.expected, passed: true })), replay: false, usageKind: 'provider-reported', usageComplete: true, usage, modelCalls: [{ complete: true, provider: 'deepseek-official', model: 'model', usage: { ...usage } }], toolCalls: [0, 1].map(phase => ({ name: 'read', phase, readSnapshot: true, isError: false })), adoptions: [{ callId: 'fixture-call', strategy: run.task === 'experiment-diagnostic-evidence' ? 'diagnostic-evidence-selection-v1' : `${run.task.slice(11)}-prose-selection-v1`, persisted: true, modelVisible: true, contentHash: 'c'.repeat(64), persistedContentHash: 'c'.repeat(64), modelVisibleContentHash: 'c'.repeat(64) }], experiments: [{ callId: 'fixture-call', reason: 'selected', llmCalled: true }] } })
+    phaseResults: (plan.tasks.find(task => task.id === run.task).phases ?? [plan.tasks.find(task => task.id === run.task)]).map(phase => ({ actual: phase.expected, passed: true, freshAnswer: true, turnCompleted: true })), replay: false, usageKind: 'provider-reported', usageComplete: true, usage, modelCalls: [{ complete: true, provider: 'deepseek-official', model: 'model', usage: { ...usage } }], toolCalls: [0, 1].map(phase => ({ name: 'read', phase, readSnapshot: true, isError: false })), adoptions: [{ callId: 'fixture-call', strategy: run.task === 'experiment-diagnostic-evidence' ? 'diagnostic-evidence-selection-v1' : `${run.task.slice(11)}-prose-selection-v1`, persisted: true, modelVisible: true, contentHash: 'c'.repeat(64), persistedContentHash: 'c'.repeat(64), modelVisibleContentHash: 'c'.repeat(64) }], experiments: [{ callId: 'fixture-call', reason: 'selected', llmCalled: true }] } })
 }
 test('strict gates reject missing/duplicate runs, mutated task coverage, forged usage and replay monetary claims', () => {
   const plan = createAcceptancePlan()
@@ -98,4 +98,13 @@ test('snapshot followup must recover snapshot in each phase, not only first phas
     { name: 'read', phase: 0, readSnapshot: true, isError: false }, { name: 'read', phase: 1, readOriginal: true, isError: false },
   ]
   assert.equal(summarizeAcceptance(plan, data, { pricing, provenance }).qualityComplete, false)
+})
+
+test('failed turns and missing fresh phase evidence cannot pass forged summary flags', () => {
+  const plan = createAcceptancePlan()
+  for (const mutate of [data => { data[0].turnEnds = [{ kind: 'error' }] },
+    data => { delete data[0].phaseResults[0].freshAnswer }, data => { data[0].phaseResults[0].turnCompleted = false }]) {
+    const data = records(plan); mutate(data)
+    assert.equal(summarizeAcceptance(plan, data, { pricing, provenance }).qualityComplete, false)
+  }
 })
