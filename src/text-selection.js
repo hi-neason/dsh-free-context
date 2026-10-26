@@ -147,16 +147,30 @@ export function createTextSelector(options) {
           if (!Number.isSafeInteger(chunk.index) || chunk.index < 0 || blocks.has(chunk.index) || !['text', 'reasoning'].includes(chunk.blockType)) return decline('invalid-stream')
           blocks.set(chunk.index, { type: chunk.blockType, text: '', ended: false })
         } else if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
+          if (!Number.isSafeInteger(chunk.index) || chunk.index < 0) return decline('invalid-stream')
+          if (!blocks.has(chunk.index)) {
+            const type = chunk.type === 'text-delta' ? 'text' : 'reasoning'
+            if (!['text', 'reasoning'].includes(type)) return decline('invalid-stream')
+            blocks.set(chunk.index, { type, text: '', ended: false })
+          }
           const block = blocks.get(chunk.index)
           if (!block || block.ended || typeof chunk.text !== 'string' || block.type !== (chunk.type === 'text-delta' ? 'text' : 'reasoning')) return decline('invalid-stream')
           outputBytes += Buffer.byteLength(chunk.text)
           if (outputBytes > config.maxOutputBytes) return decline('output-byte-budget')
           block.text += chunk.text
         } else if (chunk.type === 'block-end') {
+          if (!Number.isSafeInteger(chunk.index) || chunk.index < 0) return decline('invalid-stream')
+          if (!blocks.has(chunk.index)) {
+            const type = chunk.block?.type
+            if (!['text', 'reasoning'].includes(type)) return decline('invalid-stream')
+            blocks.set(chunk.index, { type, text: '', ended: false })
+          }
           const block = blocks.get(chunk.index)
-          if (!block || block.ended || chunk.block?.type !== block.type || chunk.block.text !== block.text) return decline('invalid-stream')
+          if (!block || block.ended || chunk.block?.type !== block.type || typeof chunk.block.text !== 'string') return decline('invalid-stream')
+          outputBytes += Buffer.byteLength(chunk.block.text) - Buffer.byteLength(block.text)
+          if (outputBytes > config.maxOutputBytes) return decline('output-byte-budget')
+          block.text = chunk.block.text
           block.ended = true
-          if (block.type === 'text') output += block.text
         } else if (chunk.type === 'usage') {
           if (sawUsage) return decline('invalid-stream')
           sawUsage = true
@@ -164,11 +178,12 @@ export function createTextSelector(options) {
           if (!usage) return decline('invalid-usage')
           if (usage.outputTokens > config.maxOutputTokens) return decline('output-token-budget')
         } else if (chunk.type === 'finish') {
-          if (chunk.reason?.kind !== 'stop' || !blocks.size || [...blocks.values()].some(block => !block.ended)) return decline('unsuccessful-finish')
+          if (chunk.reason?.kind !== 'stop' || !blocks.size) return decline('unsuccessful-finish')
           finished = true
         } else return decline('invalid-stream')
       }
       if (!finished || [...blocks.values()].filter(block => block.type === 'text').length !== 1) return decline('invalid-stream')
+      output = [...blocks.values()].filter(block => block.type === 'text').map(block => block.text).join('')
       let parsed
       try { parsed = JSON.parse(output) } catch { return decline('invalid-selection') }
       // This schema contains only IDs without spaces; canonical comparison also rejects duplicate keys.

@@ -249,3 +249,17 @@ test('diagnostic omission and optional protected terms fail closed; unknown form
   assert.equal((await createTextSelector(diagnosticOptions(llm))({ kind: 'diagnostic', text: diagnostics + '\n\nunknown result' })).reason, 'unrecognized-diagnostic-block')
   assert.equal(llm.calls.length, 0)
 })
+
+test('accepts authoritative block-end and delta-only text with bounded final bytes', async () => {
+  for (const authoritative of [true, false]) {
+    const llm = { async * stream() {
+      if (authoritative) yield { type: 'block-end', index: 0, block: { type: 'text', text: '{"selectedIds":["p2"]}' } }
+      else yield { type: 'text-delta', index: 0, text: '{"selectedIds":["p2"]}' }
+      yield { type: 'usage', usage }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } }
+    assert.equal((await createTextSelector(config(llm))({ kind: 'prose', text: source })).status, 'selected')
+    assert.equal((await createTextSelector({ ...config(llm), maxOutputBytes: 1 })({ kind: 'prose', text: source })).reason, 'output-byte-budget')
+  }
+  assert.deepEqual((await createTextSelector(config(runtime('temporary', { endText: '{"selectedIds":["p2"]}' })))({ kind: 'prose', text: source })).selectedIds, ['p2'])
+})
