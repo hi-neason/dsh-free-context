@@ -8,6 +8,16 @@ const defaults = { enabled: false, tools: [], minInputBytes: 8192, minSavingsTok
   phasePolicy: 'any', excerptCharacters: 256, maxEntriesPerStep: 1, maxSnapshotBytes: 1048576 }
 const costKeys = ['minimumFutureRequests', 'pricing', 'expectedRecoveryCost', 'safetyMargin']
 const POLICY = 'Retirement decision: '
+// Advisory progress/receipts only; native Session events remain authoritative.
+const progress = new WeakMap()
+function sessionProgress(session, backend) {
+  let state = progress.get(session)
+  if (!state || state.backend !== backend || state.saveText !== backend.saveText) {
+    state = { backend, saveText: backend.saveText, receipts: new Map(), cursor: -1 }
+    progress.set(session, state)
+  }
+  return state
+}
 const callKey = (turn, step, callId) => JSON.stringify([turn, step, callId])
 function historyIndex(events) {
   const calls = new Map()
@@ -183,8 +193,10 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
   }
   const surface = [...session.surface.nodes]
   const results = surface.filter(seq => session.eventAt(seq)?.type === 'tool/result')
-  const selected = results.slice(0, Math.max(0, results.length - config.retainRecentResults))
+  const candidates = results.slice(0, Math.max(0, results.length - config.retainRecentResults))
+  const state = sessionProgress(session, services.spillStore)
   const retained = config.tools.includes('read') ? retainedReads(session) : undefined
+  const selected = [...candidates.filter(seq => seq > state.cursor), ...candidates.filter(seq => seq <= state.cursor)]
   let attempted = 0
   for (const seq of selected) {
     if (attempted >= config.maxEntriesPerStep || signal?.aborted) break
@@ -204,7 +216,9 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
     if (modelUses < config.minModelUses) { report('insufficient-model-uses', { callId, modelUses }); continue }
     const readState = name === 'read' ? eligibleRead(services.readTracking, session, callId, retained) : undefined
     if (name === 'read' && !readState) continue
+    if (Buffer.byteLength(text) > config.maxSnapshotBytes) { report('snapshot-too-large', { callId }); continue }
     attempted++
+    state.cursor = seq
     const revision = session.seq
     const nodes = [...session.surface.nodes]
     const originalImage = JSON.stringify(original)
@@ -213,31 +227,59 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
     let economics
     try {
       const archiveExec = { agent, signal, name, callId }
-      const receipt = await archiveOriginal(services.spillStore,
-        archiveExec, text, { maxBytes: config.maxSnapshotBytes })
+      const sourceHash = hashReadContent(original.content)
+      const cached = state.receipts.get(seq)
+      let receipt = cached?.event === event && cached.sourceHash === sourceHash &&
+        cached.receipt.callId === callId && cached.receipt.toolName === name &&
+        cached.receipt.sessionId === session.header?.id ? cached.receipt : undefined
+      const reusedReceipt = receipt !== undefined
+      const saveReceipt = async () => {
+        const saved = await archiveOriginal(services.spillStore,
+          archiveExec, text, { maxBytes: config.maxSnapshotBytes })
+        // Cached receipts support advisory rejection only: the host may expire
+        // artifacts between assessments without changing the Session.
+        if (!signal?.aborted) {
+          state.receipts.set(seq, { event, sourceHash, receipt: saved })
+          while (state.receipts.size > 256) state.receipts.delete(state.receipts.keys().next().value)
+        }
+        try {
+          const pending = services.onSnapshot?.(archiveExec, saved, 'retirement')
+          if (pending && typeof pending.catch === 'function') pending.catch(() => {})
+        } catch {}
+        return saved
+      }
+      if (!receipt) receipt = await saveReceipt()
+      const assessReceipt = receipt => {
+        const policy = { modelUses, ...(boundary ?? {}) }
+        const content = [{ type: 'text', text: MARKER + POLICY + JSON.stringify(policy) + '\n' +
+          excerpt(text, config.excerptCharacters) + formatSnapshotReference(receipt) }]
+        const message = { ...original, content }
+        replacementMessage = message
+        if (Buffer.byteLength(JSON.stringify(message)) >= Buffer.byteLength(originalImage)) {
+          report('candidate-not-smaller', { callId }); return undefined
+        }
+        const originalTokens = finiteTokens(meter.estimateMessage(original))
+        const candidateTokens = finiteTokens(meter.estimateMessage(message))
+        if (originalTokens - candidateTokens < config.minSavingsTokens) { report('insufficient-token-savings', { callId }); return undefined }
+        const measurement = meter.measure(session)
+        if (measurement.logRevision !== revision) { report('history-changed', { callId }); return undefined }
+        const retainedTokens = Math.max(finiteTokens(measurement.totalTokens), finiteTokens(measurement.surfaceTokens)) - originalTokens + candidateTokens
+        economics = assessNetBenefit({ originalTokens, candidateTokens,
+          invalidatedPrefixTokens: Math.max(0, retainedTokens), compressionCost: 0, ...economicInputs })
+        if (!economics.adopt) { report('economic-gate', { callId, economics }); return undefined }
+        return { message, originalTokens }
+      }
+      let assessment = assessReceipt(receipt)
+      if (!assessment) continue
+      if (reusedReceipt && services.mode !== 'observe') {
+        receipt = await saveReceipt()
+        // A new locator/hint may change the full candidate size and economics.
+        assessment = assessReceipt(receipt)
+        if (!assessment) continue
+      }
+      const { message, originalTokens } = assessment
       const snapshot = { sha256: receipt.sha256, bytes: receipt.bytes,
         sourceCallId: receipt.callId, sessionId: receipt.sessionId, purpose: 'retirement' }
-      try {
-        const pending = services.onSnapshot?.(archiveExec, receipt, 'retirement')
-        if (pending && typeof pending.catch === 'function') pending.catch(() => {})
-      } catch {}
-      const policy = { modelUses, ...(boundary ?? {}) }
-      const content = [{ type: 'text', text: MARKER + POLICY + JSON.stringify(policy) + '\n' +
-        excerpt(text, config.excerptCharacters) + formatSnapshotReference(receipt) }]
-      const message = { ...original, content }
-      replacementMessage = message
-      if (Buffer.byteLength(JSON.stringify(message)) >= Buffer.byteLength(originalImage)) {
-        report('candidate-not-smaller', { callId }); continue
-      }
-      const originalTokens = finiteTokens(meter.estimateMessage(original))
-      const candidateTokens = finiteTokens(meter.estimateMessage(message))
-      if (originalTokens - candidateTokens < config.minSavingsTokens) { report('insufficient-token-savings', { callId }); continue }
-      const measurement = meter.measure(session)
-      if (measurement.logRevision !== revision) { report('history-changed', { callId }); continue }
-      const retainedTokens = Math.max(finiteTokens(measurement.totalTokens), finiteTokens(measurement.surfaceTokens)) - originalTokens + candidateTokens
-      economics = assessNetBenefit({ originalTokens, candidateTokens,
-        invalidatedPrefixTokens: Math.max(0, retainedTokens), compressionCost: 0, ...economicInputs })
-      if (!economics.adopt) { report('economic-gate', { callId, economics }); continue }
       // Nothing asynchronous or user-provided is invoked after this final check
       // until the two appends complete. Native post-commit observers may still run.
       if (boundary && ((services.getTaskState && services.getTaskState() !== taskProvider) ||

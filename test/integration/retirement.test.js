@@ -376,6 +376,36 @@ test('ordinary tool success cannot hide shell failure, interruption, or diagnost
   }
 })
 
+test('oversized oldest result does not consume the archive budget or starve eligible history', async t => {
+  const f = fixture(t)
+  f.session = Session.create('oversized-first'); f.agent.session = f.session
+  appendResult(f.session, 1, 'oversized', { text: 'original '.repeat(2000) })
+  appendResult(f.session, 2, 'eligible', { text: 'original '.repeat(1000) })
+  appendResult(f.session, 3, 'recent')
+  const reports = await retireHistory({ agent: f.agent }, { ...config, maxSnapshotBytes: 12000, maxEntriesPerStep: 1 }, f)
+  assert.ok(reports.some(item => item.reason === 'retired' && item.callId === 'eligible'))
+  assert.equal(f.stored.length, 1)
+})
+
+test('rejected candidates yield fairly and reuse receipts while rechecking economics', async t => {
+  const f = fixture(t)
+  f.session = Session.create('fairness'); f.agent.session = f.session
+  appendResult(f.session, 1, 'small', { text: 'original '.repeat(20) })
+  appendResult(f.session, 2, 'large')
+  appendResult(f.session, 3, 'recent')
+  const options = { ...config, maxEntriesPerStep: 1, expectedRecoveryCost: 1000 }
+  assert.equal((await retireHistory({ agent: f.agent }, options, f))[0].reason, 'candidate-not-smaller')
+  assert.equal((await retireHistory({ agent: f.agent }, options, f))[0].callId, 'large')
+  await retireHistory({ agent: f.agent }, options, f)
+  await retireHistory({ agent: f.agent }, options, f)
+  assert.equal(f.stored.length, 2)
+  await retireHistory({ agent: f.agent }, options, f)
+  const reports = await retireHistory({ agent: f.agent }, { ...options, expectedRecoveryCost: 0 }, f)
+  assert.equal(reports[0].reason, 'retired')
+  assert.equal(reports[0].callId, 'large')
+  assert.equal(f.stored.length, 3, 'adoption refreshes a previously rejected snapshot')
+})
+
 test('history lookup work is linear even when every tool is disallowed', async t => {
   const f = fixture(t)
   f.session = Session.create('linear'); f.agent.session = f.session
@@ -390,4 +420,78 @@ test('history lookup work is linear even when every tool is disallowed', async t
   t.diagnostic(`${accesses} event property accesses for ${events.length} events`)
   assert.ok(accesses < events.length * 30, `${accesses} accesses for ${events.length} events`)
   assert.equal(f.stored.length, 0)
+})
+
+test('receipt reuse is scoped to backend, save implementation, Session and actual source content', async t => {
+  for (const scenario of ['backend', 'save-method', 'session', 'source']) {
+    const f = fixture(t)
+    const options = { ...config, expectedRecoveryCost: 1000 }
+    let snapshots = 0
+    f.onSnapshot = () => snapshots++
+    await retireHistory({ agent: f.agent }, options, f)
+    await retireHistory({ agent: f.agent }, options, f)
+    assert.equal(f.stored.length, 1, scenario)
+    assert.equal(snapshots, 1, 'receipt reuse is not a new archival write')
+    if (scenario === 'backend') f.spillStore = { saveText: f.spillStore.saveText }
+    if (scenario === 'save-method') {
+      const save = f.spillStore.saveText
+      f.spillStore.saveText = input => save(input)
+    }
+    if (scenario === 'session') {
+      f.session = Session.create('independent', f.session.snapshotEvents())
+      f.agent.session = f.session
+    }
+    if (scenario === 'source') {
+      const derive = f.session.deriveEventMessage.bind(f.session)
+      f.session.deriveEventMessage = event => event === f.original
+        ? { ...derive(event), content: [{ type: 'text', text: 'updated '.repeat(2000) }] } : derive(event)
+    }
+    await retireHistory({ agent: f.agent }, options, f)
+    assert.equal(f.stored.length, 2, scenario)
+    assert.equal(snapshots, 2, scenario)
+  }
+})
+
+test('transient archival failure is retried rather than negatively cached', async t => {
+  const f = fixture(t)
+  const save = f.spillStore.saveText
+  let attempts = 0
+  f.spillStore.saveText = input => {
+    if (++attempts === 1) throw Error('temporarily unavailable')
+    return save(input)
+  }
+  assert.equal((await retireHistory({ agent: f.agent }, config, f))[0].reason, 'retirement-failed')
+  assert.equal((await retireHistory({ agent: f.agent }, config, f))[0].reason, 'retired')
+  assert.equal(attempts, 2)
+})
+
+
+test('cached assessments refresh expired snapshots before retirement and recheck the new receipt', async t => {
+  for (const scenario of ['expired', 'failure', 'oversized', 'history-change']) {
+    const f = fixture(t)
+    const artifacts = new Map()
+    let writes = 0
+    f.spillStore = { async saveText(input) {
+      writes++
+      if (writes > 1 && scenario === 'failure') throw new Error('backend unavailable')
+      if (writes > 1 && scenario === 'history-change') f.session.append('step/start', { turn: 3, step: 1 })
+      const locator = writes > 1 && scenario === 'oversized' ? 'x'.repeat(100000) : `receipt:${writes}`
+      artifacts.set(locator, input.content)
+      return { locator, bytes: Buffer.byteLength(input.content), retrievalHint: 'Read receipt.' }
+    } }
+    assert.equal((await retireHistory({ agent: f.agent }, { ...config, expectedRecoveryCost: 1000 }, f))[0].reason, 'economic-gate')
+    artifacts.clear() // Host retention can expire a rejected snapshot without a Session change.
+    const revision = f.session.seq
+    const reports = await retireHistory({ agent: f.agent }, config, f)
+    assert.equal(writes, 2, scenario)
+    if (scenario === 'expired') {
+      assert.equal(reports[0].reason, 'retired')
+      assert.ok(f.session.snapshotEvents().at(-1).data.message.content[0].text.includes('receipt:2'))
+      assert.equal(artifacts.get('receipt:2'), f.original.data.message.content[0].text)
+    } else {
+      assert.ok(!reports.some(report => report.reason === 'retired'), scenario)
+      assert.ok(f.session.surface.nodes.includes(f.original.seq), scenario)
+      if (scenario !== 'history-change') assert.equal(f.session.seq, revision)
+    }
+  }
 })
