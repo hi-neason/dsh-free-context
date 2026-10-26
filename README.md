@@ -57,7 +57,7 @@ ctx.on('free-context/decision', record => {
 
 诊断包含工具名、调用 ID、可取得的会话 ID、模式、处理结果与原因、策略名（有候选时）、输入/候选输出字节数和 token 估算、处理耗时。不会记录工具正文、参数、结构化值或异常消息。事件中的标识仍可能具有业务敏感性，日志存储与访问控制由订阅方负责。
 
-`observe` 会计算候选并报告 `observed`，保持原决策不变；`apply` 选择候选时报告 `selected`。这些结果只代表插件策略选择，不证明 Session 已写入、宿主已接受或已经产生计费收益；诊断期间取消时仍保留原决策。没有适用或达到门槛的候选时记录 `eligible/no-strategy`。失败、阻止决策、结构化值替换、取消和 PTC 内部调用报告跳过原因，不扫描其内容。`off`、空工具列表或全部策略关闭时不注册监听器，也不产生诊断。
+`observe` 会计算候选并报告 `observed`，保持原决策不变；`apply` 选择候选时报告 `selected`。这些结果只代表插件策略选择，不证明 Session 已写入、宿主已接受或已经产生计费收益；诊断期间取消或等待超过默认 1 秒时仍保留原决策；普通观察者异常会被隔离。独立 `createPostExecuteHandler` 可通过 `diagnosticsTimeoutMs` 设置等待期限。没有适用或达到门槛的候选时记录 `eligible/no-strategy`。失败、阻止决策、结构化值替换、取消和 PTC 内部调用报告跳过原因，不扫描其内容。`off`、空工具列表或全部策略关闭时不注册监听器，也不产生诊断。
 
 字节数按内容块 JSON 序列化后的 UTF-8 计算，包含块结构开销；默认 token 估算为 `ceil(bytes / 3)`，只是启发式估算，不是精确 tokenizer、媒体 token 计量、provider usage 或实际计费，也不是已节省 token。`elapsedMs` 不含下游工具策略和诊断订阅方耗时。日志候选正文包含原文快照引用；候选诊断通过受控标识关联快照与实际回读事件，详见下文快照诊断说明。
 
@@ -118,7 +118,7 @@ async function prepareSnapshot(ctx, exec, originalText) {
 }
 ```
 
-宿主必须加载 `spillStore` 后端，执行上下文必须具有 `agent.session.header.id`、`callId` 和工具 `name`。模块固定保存时的身份，返回冻结的 `sessionId`、`callId`、`toolName`、`sha256`、`bytes`、`locator` 和 `retrievalHint`。默认原文上限为 1 MiB UTF-8 字节；不成对的 Unicode surrogate 会被拒绝。存储失败、返回引用无效、字节数不符、执行身份变化或保存前后取消都会抛错。保存期间取消可能留下后端已写入的文件，但不会返回可采用的引用。
+宿主必须加载 `spillStore` 后端，执行上下文必须具有 `agent.session.header.id`、`callId` 和工具 `name`。模块固定保存时的身份，返回冻结的 `sessionId`、`callId`、`toolName`、`sha256`、`bytes`、`locator` 和 `retrievalHint`。默认原文上限为 1 MiB UTF-8 字节；不成对的 Unicode surrogate 会被拒绝。存储失败、返回引用无效、字节数不符、执行身份变化或保存前后取消都会抛错。保存等待默认最多 10 秒，可由独立 API 的 `timeoutMs` 调整；同一后端默认最多 4 个尚未结束的保存，可由 `maxPendingSaves` 调整。取消或超时会结束等待并拒绝采用，不能保证底层写入已停止；未结束的写入继续占用名额，直到后端实际结束。迟到的文件仍由后端管理。
 
 `locator` 与 `retrievalHint` 原样来自后端，不由插件推导路径。`formatSnapshotReference` 提供精确引用与恢复说明：按后端指引使用现有 read/grep 能力，完整恢复时读取全部分页并核对 UTF-8 字节数与 SHA-256。局部读取或 grep 命中不代表全文校验，也不能用源文件当前内容代替快照。存储保留期限和访问权限由宿主后端管理；保存成功不保证引用永久有效。
 
@@ -212,7 +212,7 @@ ctx.on('free-context/retirement', record => console.log(record))
 
 候选仅限允许工具的成功、单文本结果，保留最近 N 个工具结果及最近指定步数内的结果。`read` 还必须具有同版本完整覆盖的 `superseded` 记录，且覆盖它的新结果仍留在当前历史表面；`stale`、`unknown` 不代表可以删除。原文先成功保存，包含完整恢复指引的候选必须在字节和 token 上都变小，并达到最小节省量。经济门槛以宿主当前计量的全部保留上下文（含候选）保守计入一次缓存重建成本，扣除预期回读费用和安全余量；压缩本身不调用模型，模型压缩费用固定为零。计量与预测仍不是供应商账单或未来轮次保证。
 
-快照保存后，会重新检查 Session 修订号、当前表面、原消息和读取覆盖状态，任何并发变化或取消都拒绝该候选。正式退场保留原始事件，并同步相邻追加 dsh 内建 `compaction/prune` 影子计量与 `tool/result` 替换事件，保留消息身份、source 和工具调用配对；不注册额外必需事件解释器。真实 Session 测试验证 JSONL 事件序列恢复、fork，以及卸载插件后的消息派生一致性。再次运行不会重复退场已带引用的结果。
+快照保存后，会重新检查 Session 修订号、当前表面、原消息和读取覆盖状态，任何并发变化或取消都拒绝该候选。正式退场保留原始事件，并同步相邻追加 dsh 内建 `compaction/prune` 影子计量与 `tool/result` 替换事件，保留消息身份、source 和工具调用配对；不注册额外必需事件解释器。真实 Session 测试验证 JSONL 事件序列恢复、fork，以及卸载插件后的消息派生一致性。再次运行不会重复退场已带引用的结果。历史调用与曝光次数每步建立一次索引；超大原文在消耗保存尝试预算前跳过，候选轮转避免反复尝试同一项。每个 Session 对象最多保留 256 份成功快照凭据，后端或保存方法变化会清空缓存；缓存仅供预评估与拒绝重试使用；实际退场前重新归档原文，并按新引用重新计算大小、收益和提交条件，避免采用已过期快照。恢复后的新 Session 对象重新归档。
 
 这两个 append 沿用官方协议，并非数据库事务。插件诊断不会插入二者之间，但宿主的同步事件观察者仍会运行；一旦影子计量已提交，完成紧随的替换不会因观察者随后取消而中断。若第二次 append 失败，会检查真实日志和表面是否已经提交成功；确认部分提交时报告 `partial-commit`、输出固定警告，并抛出 `RETIREMENT_INCOMPLETE_PROTOCOL` 拒绝继续该模型步骤。后续发现未配对的影子计量同样报告 `incomplete-shadow-protocol` 并拒绝该步骤，需由宿主检查和恢复计量状态。不能将这种部分提交报告当作成功。
 
@@ -250,6 +250,7 @@ const experimentConfig = {
   timeoutMs: 60000,
   maxParagraphs: 50,
   maxCacheEntries: 2,
+  maxInFlight: 4, // 同一 selector 尚未结束的底层调用上限。
   protectedTerms: [], // 在此明确列出必须保留所在段落的精确词语。
   // 下列价格/未来轮数仅为演示，不是供应商报价或推荐预测。
   pricing: {
@@ -268,15 +269,17 @@ const experiment = await ctx.plugin(Experiments, experimentConfig)
 // await experiment.dispose()
 ```
 
-`pricing` 只用于辅助模型的实际调用用量；`futureCacheReadPerMillion` 是被优化的主请求在未来命中缓存时的独立读价，两者不得因模型不同而混用。所有金额须与 `currency` 一致，价格均为每百万 token 单价。若用量包含缓存写入，必须补充 `pricing.cacheWritePerMillion`，否则不采用候选。`maxCallCost` 在调用前用“每个允许的 prompt 字节按一个 token、取最高已声明输入价，加输出上限费用”作保守估算门槛；它不是供应商计费硬上限。调用后的真实 usage 会再次检查费用。缺少价格、未来请求假设、必要用量，或预测净收益不足均不采用；已发生的辅助调用费用不会因此撤销。
+`pricing` 只用于辅助模型的实际调用用量；`futureCacheReadPerMillion` 是被优化的主请求在未来命中缓存时的独立读价，两者不得因模型不同而混用。所有金额须与 `currency` 一致，价格均为每百万 token 单价。若用量包含缓存写入，必须补充 `pricing.cacheWritePerMillion`，否则不采用候选。`maxCallCost` 在调用前用“每个实际序列化 prompt 字节按一个 token、取最高已声明输入价，加输出上限费用”作保守估算门槛；它不是供应商计费硬上限。调用后的真实 usage 会再次检查费用。缺少价格、未来请求假设、必要用量，或预测净收益不足均不采用；已发生的辅助调用费用不会因此撤销。
 
 `maxInputBytes` 限制原输入，`maxPromptBytes` 限制完整请求消息序列化后的 UTF-8 字节数，不能等同模型输入 token 硬上限；`maxOutputBytes` 包括输出文本与 reasoning 流的字节数，`maxOutputTokens` 传给宿主请求的 `maxTokens`。`maxArtifactBytes` 限制调用审计文件。明确的代码围栏、JSON、TAP、列表及其他已识别结构保留原文，纯说明文本允许列表本身仍需调用方正确配置。
 
 模型仅返回 `selectedIds`；插件拒绝额外字段、改写文本、重复或越界 ID、空选择、未成功结束的流和遗漏保护词所在段落的选择。候选文本按原顺序从原文抽取，附段落 ID、UTF-16 起止位置与策略版本。来源匹配只证明这些片段来自原文，不证明未选段落没有必要证据。
 
-**`observe` 也会产生辅助模型费用并写入快照**，只是保持模型输入不变。插件先保存原文，成功选择后保存会话归属的审计 manifest（完整 prompt、response、原始与本次 usage、选择范围和预算），候选附两份真实恢复引用。只有包含引用的完整候选仍缩小，并通过净收益门槛时，`apply` 才选择替换模型可见工具内容；不改程序结构化值，也不直接改写主 Agent 请求或历史日志。存储失败或取消均保留原文，已写快照由宿主后端清理。
+**`observe` 也会产生辅助模型费用并写入快照**，只是保持模型输入不变。插件先以纯准备阶段检查格式、分段、实际 prompt 字节和包含完整请求的 manifest 最低大小；这些检查不写存储、不调用模型。通过后保存原文，成功选择后保存会话归属的审计 manifest（完整 prompt、response、原始与本次 usage、选择范围和预算），候选附两份真实恢复引用。只有包含引用的完整候选仍缩小，并通过净收益门槛时，`apply` 才选择替换模型可见工具内容；不改程序结构化值，也不直接改写主 Agent 请求或历史日志。存储失败或取消均保留原文，已写快照由宿主后端清理。
 
-`free-context/experiment` 事件只报告调用标识、模式、原因、用量、估算费用与缓存命中，不报告正文、工具参数或密钥。缓存按会话对象隔离，键包含完整原文哈希和模型/策略配置，每个会话最多保存 `maxCacheEntries` 项。命中时复用经过校验的选择，`originUsage` 表示原选择调用用量，`callUsage` 缺省且 `llmCalled: false` 表示本次没有新调用，不能再次计费。纯选择核心也可从 `dsh-free-context/text-selection` 导入 `createTextSelector`，但独立调用者需自行完成归档与经济门槛。
+`free-context/experiment` 事件只报告调用标识、模式、原因、用量、估算费用与缓存命中，不报告正文、工具参数或密钥。缓存按会话对象隔离，键包含完整原文哈希和模型/策略配置，每个会话最多保存 `maxCacheEntries` 项。命中时复用经过校验的选择，`originUsage` 表示原选择调用用量，`callUsage` 缺省且 `llmCalled: false` 表示本次没有新调用，不能再次计费。相同 Session、配置、原文和查询的并发选择合并为一次模型调用；各等待方独立取消，最后一方退出才中止底层请求。一次调用的 `callUsage` 只归因到一个存活等待方，其他方以 `shared: true`、`llmCalled: false` 表示无新增费用，保留 `originUsage`；超时或取消后，尚未结束的底层流继续占用 `maxInFlight` 名额；已完成的缓存命中不占调用名额。取消不能保证远端停止计费，缺少 usage 仍禁止采用。
+
+纯选择核心也可从 `dsh-free-context/text-selection` 导入 `createTextSelector`；原 callable 接口保留，另提供 `select.prepare(input)` 和 `select.execute(token, { session, signal })`。准备 token 仅在创建它的 selector 中有效，暴露 `requestBytes` 和 `minimumManifestBytes` 供调用前拒绝；最低大小通过后，完整 manifest 仍须通过最终预算。独立调用者需自行完成归档与经济门槛。
 
 已用官方 dsh runtime/provider 和 `deepseek-flash` 完成一次合成文本观察探针：实际输入 4,224 token、输出 9 token，保留保护段落；第二次命中缓存且无新模型调用，两次均保持原工具内容。该探针和 fake-adapter 集成测试验证了接口、归档、保护规则及失败边界，不是完整任务质量或账单收益证明；演示价格换算不等于供应商实收。
 
