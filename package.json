@@ -13,7 +13,8 @@
     "./retirement": "./src/retirement.js",
     "./experiments": "./src/experiments.js",
     "./text-selection": "./src/text-selection.js",
-    "./diagnostic-evidence": "./src/diagnostic-evidence.js"
+    "./diagnostic-evidence": "./src/diagnostic-evidence.js",
+    "./recovery": "./src/recovery.js"
   },
   "files": [
     "src",
