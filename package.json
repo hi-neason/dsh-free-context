@@ -32,7 +32,8 @@
     "evaluate": "node scripts/evaluate.js",
     "evaluate:agent": "node scripts/evaluate-agent.js",
     "evaluate:live": "node scripts/evaluate-live.js",
-    "evaluate:retirement": "node scripts/evaluate-retirement.js"
+    "evaluate:retirement": "node scripts/evaluate-retirement.js",
+    "evaluate:acceptance": "node scripts/acceptance-benchmark-cli.js"
   },
   "license": "MIT"
 }
