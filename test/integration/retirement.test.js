@@ -375,3 +375,19 @@ test('ordinary tool success cannot hide shell failure, interruption, or diagnost
     assert.ok(f.session.surface.nodes.includes(old.seq))
   }
 })
+
+test('history lookup work is linear even when every tool is disallowed', async t => {
+  const f = fixture(t)
+  f.session = Session.create('linear'); f.agent.session = f.session
+  for (let index = 0; index < 200; index++) appendResult(f.session, index + 1, `call-${index}`)
+  const events = f.session.snapshotEvents()
+  let accesses = 0
+  const counted = events.map(event => new Proxy(event, { get(target, property) {
+    accesses++; return Reflect.get(target, property)
+  } }))
+  f.session.snapshotEvents = () => counted
+  await retireHistory({ agent: f.agent }, { ...config, tools: ['other'] }, f)
+  t.diagnostic(`${accesses} event property accesses for ${events.length} events`)
+  assert.ok(accesses < events.length * 30, `${accesses} accesses for ${events.length} events`)
+  assert.equal(f.stored.length, 0)
+})

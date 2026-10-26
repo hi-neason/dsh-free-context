@@ -8,6 +8,35 @@ const defaults = { enabled: false, tools: [], minInputBytes: 8192, minSavingsTok
   phasePolicy: 'any', excerptCharacters: 256, maxEntriesPerStep: 1, maxSnapshotBytes: 1048576 }
 const costKeys = ['minimumFutureRequests', 'pricing', 'expectedRecoveryCost', 'safetyMargin']
 const POLICY = 'Retirement decision: '
+const callKey = (turn, step, callId) => JSON.stringify([turn, step, callId])
+function historyIndex(events) {
+  const calls = new Map()
+  const exposure = new Map()
+  let steps = 0
+  let uses = 0
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index]
+    exposure.set(event.seq, { steps, uses })
+    if (event.type === 'tool/call') calls.set(callKey(event.data.turn, event.data.step, event.data.callId), event)
+    if (event.type === 'step/start') steps++
+    if (event.type === 'assistant/message' || (event.type === 'assistant/attempt' &&
+      (event.data.usage?.inputTokens ?? 0) + (event.data.usage?.cacheReadTokens ?? 0) > 0)) uses++
+  }
+  return { calls, exposure }
+}
+function retainedReads(session) {
+  const retained = new Map()
+  for (const seq of session.surface.nodes) {
+    const event = session.eventAt(seq)
+    if (event?.type !== 'tool/result' || event.surfaceOp !== 'append' || event.sourceEventSeqs?.length) continue
+    const message = session.deriveEventMessage(event)
+    if (message.isError || message.content?.some(block => block.type === 'text' && block.text.startsWith(MARKER))) continue
+    const callId = message.source?.callId
+    if (!retained.has(callId)) retained.set(callId, [])
+    retained.get(callId).push(message.content)
+  }
+  return retained
+}
 
 function taskBoundary(provider, session) {
   if (typeof provider?.getState !== 'function') return undefined
@@ -77,25 +106,15 @@ export function resolveRetirementConfig(input = {}) {
   return Object.freeze(config)
 }
 
-function eligibleRead(tracking, session, callId) {
+function eligibleRead(tracking, session, callId, retained) {
   const old = tracking?.query(session, callId)
   const newer = old?.supersededBy && tracking.query(session, old.supersededBy)
   if (old?.status !== 'superseded' || newer?.status !== 'active' || !old.version ||
     old.version !== newer.version || old.targetKey !== newer.targetKey || newer.start > old.start ||
     newer.end < old.end || old.end < old.start) return undefined
-  const retained = [...session.surface.nodes].some(seq => {
-    const event = session.eventAt(seq)
-    if (event?.type !== 'tool/result') return false
-    // A native pruner or other replacement may retain call identity while
-    // removing lines. Tracker coverage describes the original returned window,
-    // so a replaced surface node cannot serve as full-coverage evidence.
-    if (event.surfaceOp !== 'append' || event.sourceEventSeqs?.length) return false
-    const message = session.deriveEventMessage(event)
-    return message.source?.callId === newer.callId && !message.isError && newer.contentHash &&
-      hashReadContent(message.content) === newer.contentHash &&
-      !message.content?.some(block => block.type === 'text' && block.text.startsWith(MARKER))
-  })
-  if (!retained) return undefined
+  // Only actual retained native append content can establish complete coverage.
+  if (!newer.contentHash || !retained.get(newer.callId)?.some(content =>
+    hashReadContent(content) === newer.contentHash)) return undefined
   return JSON.stringify([old, newer])
 }
 
@@ -154,36 +173,36 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
     } catch {}
     if (!boundary) { report('missing-task-boundary'); return reports }
   }
+  const index = historyIndex(events)
   const past = previousRetirements(events)
   if (boundary && past.some(item => item.boundaryId === boundary.boundaryId)) {
     report('boundary-already-retired'); return reports
   }
-  if (past.length && events.filter(event => event.type === 'step/start' && event.seq > past.at(-1).seq).length < config.minStepsBetweenRetirements) {
+  if (past.length && index.exposure.get(past.at(-1).seq).steps < config.minStepsBetweenRetirements) {
     report('retirement-cooldown'); return reports
   }
   const surface = [...session.surface.nodes]
   const results = surface.filter(seq => session.eventAt(seq)?.type === 'tool/result')
   const selected = results.slice(0, Math.max(0, results.length - config.retainRecentResults))
+  const retained = config.tools.includes('read') ? retainedReads(session) : undefined
   let attempted = 0
   for (const seq of selected) {
     if (attempted >= config.maxEntriesPerStep || signal?.aborted) break
     const event = session.eventAt(seq)
     const original = session.deriveEventMessage(event)
     const callId = original.source?.callId
-    const call = events.find(item => item.type === 'tool/call' && item.data.callId === callId &&
-      item.data.turn === event.data.turn && item.data.step === event.data.step)
+    const call = index.calls.get(callKey(event.data.turn, event.data.step, callId))
     const name = call?.data.name
     const text = original.content?.length === 1 && original.content[0]?.type === 'text' ? original.content[0].text : undefined
     if (!config.tools.includes(name) || original.isError || event.data.error || typeof text !== 'string' ||
       text.startsWith(MARKER) || Buffer.byteLength(text) < config.minInputBytes ||
-      events.filter(item => item.seq > seq && item.type === 'step/start').length < config.minAgeSteps) continue
+      index.exposure.get(seq).steps < config.minAgeSteps) continue
     if (protectedEvidence(text)) { report('protected-status-evidence', { callId }); continue }
     // Only committed model outcomes count. A step start or abandoned request is
     // not evidence of exposure; retries with committed attempts count separately.
-    const modelUses = events.filter(item => item.seq > seq && (item.type === 'assistant/message' ||
-      (item.type === 'assistant/attempt' && ((item.data.usage?.inputTokens ?? 0) + (item.data.usage?.cacheReadTokens ?? 0) > 0)))).length
+    const modelUses = index.exposure.get(seq).uses
     if (modelUses < config.minModelUses) { report('insufficient-model-uses', { callId, modelUses }); continue }
-    const readState = name === 'read' ? eligibleRead(services.readTracking, session, callId) : undefined
+    const readState = name === 'read' ? eligibleRead(services.readTracking, session, callId, retained) : undefined
     if (name === 'read' && !readState) continue
     attempted++
     const revision = session.seq
@@ -228,7 +247,7 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
       if (signal?.aborted || agent.session !== session || session.seq !== revision ||
         JSON.stringify([...session.surface.nodes]) !== JSON.stringify(nodes) || !nodes.includes(seq) ||
         session.eventAt(seq) !== event || JSON.stringify(session.deriveEventMessage(event)) !== originalImage ||
-        (name === 'read' && eligibleRead(services.readTracking, session, callId) !== readState)) {
+        (name === 'read' && eligibleRead(services.readTracking, session, callId, retainedReads(session)) !== readState)) {
         report(signal?.aborted ? 'aborted' : 'history-changed', { callId }); continue
       }
       if (services.mode === 'observe') {
