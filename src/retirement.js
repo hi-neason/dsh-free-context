@@ -1,5 +1,5 @@
 import { archiveOriginal, formatSnapshotReference } from './snapshot.js'
-import { assessNetBenefit } from './economics.js'
+import { assessNetBenefit, calibrateRequestForecast } from './economics.js'
 import { hashReadContent } from './read-lifecycle.js'
 
 const MARKER = '[dsh-free-context retired v1]\n'
@@ -95,7 +95,7 @@ export class RetirementProtocolError extends Error {
 export function resolveRetirementConfig(input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input) ||
     ![Object.prototype, null].includes(Object.getPrototypeOf(input))) throw new TypeError('Invalid retirement config')
-  for (const key of Reflect.ownKeys(input)) if (!Object.hasOwn(defaults, key) && !costKeys.includes(key)) throw new TypeError(`Unknown retirement option: ${String(key)}`)
+  for (const key of Reflect.ownKeys(input)) if (!Object.hasOwn(defaults, key) && !costKeys.includes(key) && key !== 'forecast') throw new TypeError(`Unknown retirement option: ${String(key)}`)
   if (input.pricing !== undefined) {
     for (const key of Reflect.ownKeys(input.pricing)) {
       if (!['uncachedInputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion'].includes(key)) throw new TypeError('Unknown retirement price')
@@ -111,6 +111,25 @@ export function resolveRetirementConfig(input = {}) {
   }
   assessNetBenefit({ originalTokens: 2, candidateTokens: 1, invalidatedPrefixTokens: 1,
     compressionCost: 0, ...Object.fromEntries(costKeys.map(key => [key, config[key]])) })
+  if (config.forecast !== undefined) {
+    const forecast = config.forecast
+    if (!forecast || typeof forecast !== 'object' || Array.isArray(forecast) ||
+        Reflect.ownKeys(forecast).some(key => !['scope', 'observations', 'minimumSamples', 'maximumSamples', 'maximumRequests'].includes(key))) {
+      throw new TypeError('Invalid retirement forecast')
+    }
+    const { observations, ...options } = forecast
+    const calibrated = calibrateRequestForecast(observations, options)
+    // Empirical evidence can only tighten caller assumptions, never make a
+    // previously conservative horizon or recovery allowance more optimistic.
+    config.minimumFutureRequests = calibrated.status === 'calibrated'
+      ? Math.min(config.minimumFutureRequests ?? calibrated.minimumFutureRequests, calibrated.minimumFutureRequests) : 0
+    if (calibrated.status === 'calibrated') config.expectedRecoveryCost = Math.max(config.expectedRecoveryCost ?? 0, calibrated.expectedRecoveryCost)
+    if (Array.isArray(observations)) {
+      for (const item of observations) if (item && typeof item === 'object') Object.freeze(item)
+      Object.freeze(observations)
+    }
+    Object.freeze(forecast)
+  }
   Object.freeze(config.tools)
   if (config.pricing) Object.freeze(config.pricing)
   return Object.freeze(config)

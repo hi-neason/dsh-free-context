@@ -44,3 +44,21 @@ test('pre-step installer awaits work then delegates; defaults register nothing a
   off()
   assert.equal(disposed, true)
 })
+
+test('optional empirical forecast clamps optimistic inputs and missing evidence disables adoption', () => {
+  const forecast = { scope: 'flash/tap', observations: [2, 3, 200].map((remainingRequests, index) => ({
+    runId: `run-${index}`, scope: 'flash/tap', usageKind: 'provider-reported', usageComplete: true,
+    qualityPassed: true, remainingRequests, recoveryCost: .0001,
+  })) }
+  const input = { minimumFutureRequests: 200, expectedRecoveryCost: 0, forecast }
+  const config = resolveRetirementConfig(input)
+  assert.equal(config.minimumFutureRequests, 2)
+  assert.equal(config.expectedRecoveryCost, .0001)
+  assert.equal(input.minimumFutureRequests, 200)
+  assert.equal(Object.isFrozen(config.forecast.observations[0]), true)
+  forecast.observations[0].remainingRequests = 999
+  assert.equal(config.forecast.observations[0].remainingRequests, 2)
+  assert.equal(resolveRetirementConfig(config).minimumFutureRequests, 2, 'normalization is idempotent')
+  assert.equal(resolveRetirementConfig({ ...input, forecast: { scope: 'flash/tap', observations: [] } }).minimumFutureRequests, 0)
+  assert.throws(() => resolveRetirementConfig({ forecast: { scope: 'flash/tap', observations: [], typo: true } }))
+})

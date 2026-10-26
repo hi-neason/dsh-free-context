@@ -106,3 +106,48 @@ test('does not mutate input and scales consistently when all cost units change t
   assert.equal(scaled.breakEvenRequests, result.breakEvenRequests)
   close(scaled.conservativeNetBenefit, result.conservativeNetBenefit * 1000)
 })
+
+test('forecast calibration uses comparable complete independent runs and a conservative cap', async () => {
+  const { calibrateRequestForecast } = await import('dsh-free-context/economics')
+  const observations = [2, 200, 3].map((remainingRequests, index) => ({
+    runId: `run-${index}`, scope: 'flash/tap', usageKind: 'provider-reported', usageComplete: true,
+    qualityPassed: true, remainingRequests, recoveryCost: index / 1000,
+  }))
+  const result = calibrateRequestForecast(observations, { scope: 'flash/tap', maximumRequests: 8 })
+  assert.equal(result.status, 'calibrated')
+  assert.equal(result.minimumFutureRequests, 2)
+  assert.equal(result.expectedRecoveryCost, 0.002)
+  assert.equal(result.sampleCount, 3)
+  const long = observations.map(item => ({ ...item, remainingRequests: 200 }))
+  assert.equal(calibrateRequestForecast(long, { scope: 'flash/tap', maximumRequests: 8 }).minimumFutureRequests, 8)
+  assert.equal(calibrateRequestForecast(observations.slice(0, 2), { scope: 'flash/tap' }).reason, 'insufficient-observations')
+  assert.deepEqual(observations.map(item => item.remainingRequests), [2, 200, 3])
+})
+
+test('calibration rejects synthetic, duplicated, mismatched, failed and incomplete observations', async () => {
+  const { calibrateRequestForecast } = await import('dsh-free-context/economics')
+  const observation = { runId: 'run', scope: 'flash/tap', usageKind: 'provider-reported', usageComplete: true,
+    qualityPassed: true, remainingRequests: 2, recoveryCost: 0.0001 }
+  for (const change of [{ usageKind: 'synthetic-replay' }, { usageComplete: false }, { qualityPassed: false },
+    { scope: 'another-model/tap' }, { remainingRequests: -1 }, { recoveryCost: undefined }]) {
+    const records = [0, 1, 2].map(index => ({ ...observation, runId: `run-${index}` }))
+    Object.assign(records[1], change)
+    assert.equal(calibrateRequestForecast(records, { scope: observation.scope }).status, 'declined')
+  }
+  assert.equal(calibrateRequestForecast(Array(3).fill(observation), { scope: observation.scope }).reason, 'duplicate-run')
+  assert.equal(calibrateRequestForecast([], { scope: observation.scope }).status, 'declined')
+  assert.throws(() => calibrateRequestForecast([], { scope: observation.scope, minimumSamples: 1 }), TypeError)
+})
+
+test('calibrated two-request horizon rejects the historical 200-request optimistic decision', async () => {
+  const { calibrateRequestForecast } = await import('dsh-free-context/economics')
+  const records = Array.from({ length: 3 }, (_, index) => ({ runId: `r${index}`, scope: 'flash/tap',
+    usageKind: 'provider-reported', usageComplete: true, qualityPassed: true, remainingRequests: 2, recoveryCost: 0.0001 }))
+  const forecast = calibrateRequestForecast(records, { scope: 'flash/tap' })
+  const input = scenario({ originalTokens: 10000, candidateTokens: 1000, invalidatedPrefixTokens: 20000,
+    minimumFutureRequests: 200, pricing: { uncachedInputPerMillion: .3, cacheReadPerMillion: .006 },
+    compressionCost: 0, expectedRecoveryCost: 0, safetyMargin: .25 })
+  assert.equal(assessNetBenefit(input).adopt, true)
+  assert.equal(assessNetBenefit({ ...input, minimumFutureRequests: forecast.minimumFutureRequests,
+    expectedRecoveryCost: forecast.expectedRecoveryCost }).adopt, false)
+})

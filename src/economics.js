@@ -80,3 +80,42 @@ export function assessNetBenefit(input = {}) {
     rebuildPriceSource: pricing.cacheWritePerMillion === undefined ? 'uncached-input' : 'cache-write',
   }
 }
+
+/**
+ * Conservative empirical configuration suggestion, never a future guarantee.
+ * Caller supplies comparable completed provider runs in one explicit scope
+ * (workload/model/policy/price regime). We cannot authenticate that provenance.
+ * Do not omit failed or short runs: any failed/incomplete/mismatched sample
+ * declines calibration. Use the minimum observed remaining requests, capped
+ * by an explicit risk ceiling, and maximum observed TOTAL recovery cost.
+ * A zero-request sample disables adoption. Recalibrate after workload changes.
+ */
+export function calibrateRequestForecast(observations, {
+  scope, minimumSamples = 3, maximumSamples = 64, maximumRequests = 8,
+} = {}) {
+  if (typeof scope !== 'string' || !scope.trim()) throw new TypeError('Explicit calibration scope is required')
+  for (const [key, value] of Object.entries({ minimumSamples, maximumSamples, maximumRequests })) {
+    if (!Number.isSafeInteger(value) || value < (key === 'minimumSamples' ? 3 : 1)) throw new TypeError(`Invalid ${key}`)
+  }
+  if (minimumSamples > maximumSamples) throw new TypeError('minimumSamples exceeds maximumSamples')
+  const decline = reason => Object.freeze({ status: 'declined', reason })
+  if (!Array.isArray(observations) || observations.length < minimumSamples) return decline('insufficient-observations')
+  if (observations.length > maximumSamples) return decline('observation-budget')
+  const seen = new Set()
+  let requests = maximumRequests
+  let recoveryCost = 0
+  for (const item of observations) {
+    if (!item || item.scope !== scope || item.usageKind !== 'provider-reported' ||
+        item.usageComplete !== true || item.qualityPassed !== true ||
+        typeof item.runId !== 'string' || !item.runId.trim() ||
+        !Number.isSafeInteger(item.remainingRequests) || item.remainingRequests < 0 ||
+        typeof item.recoveryCost !== 'number' || !Number.isFinite(item.recoveryCost) || item.recoveryCost < 0) return decline('invalid-observation')
+    if (seen.has(item.runId)) return decline('duplicate-run')
+    seen.add(item.runId)
+    requests = Math.min(requests, item.remainingRequests)
+    recoveryCost = Math.max(recoveryCost, item.recoveryCost)
+  }
+  return Object.freeze({ status: 'calibrated', calibrationKind: 'empirical-conservative', scope,
+    sampleCount: observations.length, minimumFutureRequests: requests, expectedRecoveryCost: recoveryCost,
+    maximumRequests, guaranteesFutureRequests: false })
+}
