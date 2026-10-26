@@ -27,3 +27,11 @@ export function priceUsage(usage, prices) {
   const cost = (usage.inputTokens * prices.uncached + usage.outputTokens * prices.output + (usage.cacheReadTokens ?? 0) * prices.cacheRead) / 1e6
   return Number.isFinite(cost) ? cost : null
 }
+/** Provider bodies and arbitrary exception strings are never evaluation evidence. */
+export function safeFailure(error) {
+  const codes = { EACCES: 'filesystem', EPERM: 'filesystem', ENOENT: 'filesystem', ENOSPC: 'filesystem', ETIMEDOUT: 'timeout', ABORTED: 'timeout', UNAUTHORIZED: 'auth', INVALID_API_KEY: 'auth', CONFIG_INVALID: 'configuration' }
+  const names = { TimeoutError: 'timeout', AbortError: 'timeout', TypeError: 'configuration', SyntaxError: 'configuration' }
+  const code = Object.hasOwn(codes, error?.code) ? error.code : undefined
+  const name = Object.hasOwn(names, error?.name) ? error.name : undefined
+  return { category: code ? codes[code] : name ? names[name] : 'unknown', ...(code ? { code } : {}), ...(name ? { name } : {}) }
+}

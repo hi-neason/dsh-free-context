@@ -1,5 +1,6 @@
-import { summarizeUsage, priceUsage } from './evaluation-accounting.js'
+import { validUsage, summarizeUsage, priceUsage, safeFailure } from './evaluation-accounting.js'
 export { summarizeUsage, priceUsage } from './evaluation-accounting.js'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -8,6 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { decodeJsonRows } from '../src/json-codec.js'
 import * as plugin from '../src/index.js'
+import * as experimentsPlugin from '../src/experiments.js'
 import { loadFixtures } from './evaluate.js'
 
 const runtime = createRequire(resolve(process.env.DSH_RUNTIME_ROOT ?? '.omx/integration-runtime', 'package.json'))
@@ -73,7 +75,25 @@ class ReplayAdapter extends LlmAdapter {
   }
 }
 
-export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs } = {}) {
+const contentHash = content => createHash('sha256').update(JSON.stringify(content)).digest('hex')
+
+/** Only persisted tool results actually sent to a later model request prove adoption. */
+export function collectAdoptions(events, modelCalls) {
+  return events.filter(event => event.type === 'tool/result').flatMap(event => {
+    const message = event.data.message
+    if (message.isError) return []
+    const text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
+    const strategy = text.match(/^\[LOSSY (?:paragraph|diagnostic evidence) selection; policy ([a-z-]+-v1)\./)?.[1]
+    if (!strategy) return []
+    const hash = contentHash(message.content)
+    const visible = modelCalls.flatMap(call => call.visibleToolResults ?? []).find(result => result.callId === message.toolCallId && result.contentHash === hash)
+    return [{ callId: message.toolCallId, strategy, persisted: true, modelVisible: Boolean(visible), contentHash: hash,
+      persistedContentHash: hash, modelVisibleContentHash: visible?.contentHash ?? null }]
+  })
+}
+
+export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs, experimentalConfig, adapterFactory, maxSteps = criteria.maxSteps, configureContext, composeWithTunedNative = false, validationFeedbackLimit = 0 } = {}) {
+  if (!Number.isSafeInteger(validationFeedbackLimit) || validationFeedbackLimit < 0 || validationFeedbackLimit > 2) throw new TypeError('Validation feedback limit must be 0..2')
   if (!groups.includes(group)) throw new TypeError('Unknown evaluation group')
   if (!replay && !key) throw new TypeError('Missing explicit credential')
   const directory = await mkdtemp(join(tmpdir(), 'dsh-agent-eval-'))
@@ -85,6 +105,12 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
   const decisions = []
   const toolCalls = []
   const retirements = []
+  const modelCalls = []
+  const experiments = []
+  const phaseResults = []
+  const drafts = []
+  const feedback = []
+  let phaseIndex = 0
   let steps = 0
   let stoppedReason
   let snapshotPath
@@ -93,12 +119,29 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
   const started = performance.now()
   try {
     if (key) ctx.provide('launchEnvironment', createLaunchEnvironmentSnapshot([{ source: 'process', values: { DEEPSEEK_API_KEY: key } }]))
-    await mountAgentLoopTestDependencies(ctx, { workingDirectory: true, systemPrompt: { personaPrefix: '' } })
+    await mountAgentLoopTestDependencies(ctx, { workingDirectory: true, ...(fixture.ptc ? { tools: { mode: 'ptc' } } : {}), systemPrompt: { personaPrefix: '' } })
+    ctx.on('llm/stream', (request, next) => (async function* () {
+      const visibleToolResults = (request.messages ?? []).filter(message => message.role === 'tool').map(message => ({ callId: message.toolCallId, contentHash: contentHash(message.content) }))
+      const record = { visibleToolResults, id: modelCalls.length + 1, kind: request.tools?.length ? 'agent' : 'auxiliary', provider: request.provider, model: request.model, usage: null, finish: null }
+      modelCalls.push(record)
+      try {
+        for await (const chunk of next()) {
+          if (chunk.type === 'usage') record.usage = chunk.usage
+          if (chunk.type === 'finish') record.finish = chunk.reason.kind
+          yield chunk
+        }
+      } finally { record.complete = validUsage(record.usage) && record.finish !== null }
+    })())
+    if (fixture.ptc) {
+      for (const name of ['dsh-subprocess-local', 'dsh-sandbox-local']) { const module = await load(name); await ctx.plugin(module.default ?? module) }
+      await ctx.plugin((await load('dsh-sandbox-policy')).default, { mode: 'read-only' })
+      await ctx.plugin((await load('dsh-ptc-runtime-node')).NodePtcRuntime, { timeoutMs: 15000, maxTimeoutMs: 15000 })
+    }
     await ctx.plugin(SpillLocal, { root: join(directory, 'spill'), cleanupPeriodDays: 0 })
-    await ctx.plugin(ToolFs, { read: true, readImage: false, write: false, edit: false, readLimit: 1000 })
+    await ctx.plugin(ToolFs, { read: true, readImage: false, write: fixture.edit === true, edit: fixture.edit === true, readLimit: 1000 })
     // Actual official policy composition; the base bundle declares 12500.
-    const maxInlineTokens = group === 'baseline-tuned' ? 1200 : 12500
-    await ctx.plugin(SpillPolicy, { maxInlineTokens })
+    const maxInlineTokens = group === 'baseline-tuned' || composeWithTunedNative && group === 'plugin' ? 1200 : 12500
+    if (!composeWithTunedNative) await ctx.plugin(SpillPolicy, { maxInlineTokens })
     if (historyRetirement) {
       const { default: TokenMeter } = await load('dsh-token-meter')
       await ctx.plugin(TokenMeter)
@@ -113,7 +156,13 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     }
     if (group === 'plugin') await ctx.plugin(plugin, historyRetirement
       ? { mode: 'apply', tools: [], retirement: historyRetirement }
-      : { mode: 'apply', tools: ['fixture'], minInputBytes: 0, logs: { enabled: true } })
+      : { mode: 'apply', tools: [fixture.ptc ? 'run_code' : 'fixture'], minInputBytes: 0, logs: { enabled: true } })
+    if (group === 'plugin' && experimentalConfig) {
+      ctx.provide('freeContextQuery', { getQuery: () => fixture.phases?.[phaseIndex]?.query ?? fixture.query })
+      await ctx.plugin(experimentsPlugin, experimentalConfig)
+    }
+    if (composeWithTunedNative) await ctx.plugin(SpillPolicy, { maxInlineTokens })
+    ctx.on('free-context/experiment', record => experiments.push(record))
     ctx.on('free-context/decision', record => decisions.push(record))
     ctx.on('tools/post-execute', async (exec, result, next) => {
       const decision = await next()
@@ -122,46 +171,84 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       delivered = text
       const reference = text.match(/Original tool-result snapshot: (\{[^\n]+\})/)
       if (reference) snapshotPath = JSON.parse(reference[1]).locator
-      toolCalls.push({ name: exec.name, bytes: Buffer.byteLength(text), isError: result.isError === true,
+      toolCalls.push({ callId: exec.callId, name: exec.name, phase: phaseIndex, bytes: Buffer.byteLength(text), isError: result.isError === true,
         ...(exec.name === 'read' ? { readSnapshot: exec.arguments.file_path === snapshotPath, readOriginal: exec.arguments.file_path === source } : {}) })
       return decision
     }, { prepend: true })
     ctx.tools.register(defineContentToolFixture({ name: 'fixture', description: 'Return immutable evaluation dataset.', parameters: {}, execute: async () => [{ type: 'text', text: fixture.text }] }))
-    if (replay) ctx.llm.registerAdapter(['replay'], new ReplayAdapter(fixture, source, () => snapshotPath, () => delivered))
+    if (replay) ctx.llm.registerAdapter(['replay'], adapterFactory ? adapterFactory({ LlmAdapter, fixture, source, snapshotPath: () => snapshotPath, delivered: () => delivered, phase: () => phaseIndex }) : new ReplayAdapter(fixture, source, () => snapshotPath, () => delivered))
     else await ctx.plugin(Provider, { apiKeyEnv: 'DEEPSEEK_API_KEY', thinking: 'disabled', reasoningEffort: 'off', maxTokens: 1024, streamIdleTimeoutMs: 30000 })
+    await configureContext?.(ctx)
     const harness = await mountAgentLoopTestHarness(ctx)
     ctx.on('agent/pre-step', async (_payload, next) => {
-      if (++steps > criteria.maxSteps) { stoppedReason = 'max-steps'; throw new Error('Evaluation step limit') }
+      if (++steps > maxSteps) { stoppedReason = 'max-steps'; throw new Error('Evaluation step limit') }
       return next()
     })
     agent = await harness.create(`eval-${group}-${fixture.id}`, { provider: replay ? 'replay' : 'deepseek-official', model }, { cwd: directory })
     timer = setTimeout(() => { stoppedReason = 'timeout'; agent.cancel({ kind: 'hook', reason: 'evaluation-timeout' }) }, timeoutMs)
-    agent.followup(createUserMessage({ content: [{ type: 'text', text: `${fixture.query}\nOriginal fixture path: ${source}` }], source: { kind: 'user' } }))
-    await agent.whenIdle()
+    for (const [index, phase] of (fixture.phases ?? [{ query: fixture.query, expected: fixture.expected }]).entries()) {
+      phaseIndex = index
+      let prompt = `${phase.query}\nOriginal fixture path: ${source}`
+      for (let correction = 0; correction <= validationFeedbackLimit; correction++) {
+        agent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }))
+        await agent.whenIdle()
+        const phaseMessages = agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')
+        const answer = phaseMessages.at(-1)?.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
+        let actual = null
+        let parsed = false
+        try { actual = JSON.parse(answer); parsed = actual !== null && typeof actual === 'object' } catch {}
+        const issues = []
+        if (!parsed) issues.push('Return the requested JSON object only, without prose or Markdown.')
+        if (!toolCalls.some(call => call.name === (fixture.ptc ? 'run_code' : 'fixture') && !call.isError)) issues.push('Use the required fixture tool before answering.')
+        if (fixture.requireReadEachPhase && !toolCalls.some(call => call.phase === index && call.name === 'read' && !call.isError)) issues.push('Read the required source in this phase before answering.')
+        const needsSnapshot = group === 'plugin' && (fixture.kind === 'tap' || fixture.requireSnapshot) && (!historyRetirement || retirements.some(record => record.reason === 'retired'))
+        if (needsSnapshot && !toolCalls.some(call => call.phase === index && call.readSnapshot && !call.isError)) issues.push('Read the ORIGINAL snapshot locator from the latest tool result or retirement replacement in history now. Do not call fixture again or substitute the user original file.')
+        if (fixture.edit && index === (fixture.phases?.length ?? 1) - 1 && !toolCalls.some(call => call.phase === index && ['edit', 'write'].includes(call.name) && !call.isError)) issues.push('Perform the requested file edit and verify it by reading the file.')
+        drafts.push({ phase: index, correction, actual, exactFacts: isDeepStrictEqual(actual, phase.expected), issues })
+        if (!issues.length || correction === validationFeedbackLimit || stoppedReason || steps >= maxSteps) {
+          phaseResults.push({ actual, passed: isDeepStrictEqual(actual, phase.expected) })
+          break
+        }
+        feedback.push({ phase: index, correction: correction + 1, issues })
+        prompt = `Validation feedback: ${issues.join(' ')} Recheck the source evidence and satisfy the original request. No expected answer is supplied.`
+      }
+      if (stoppedReason) break
+    }
     const events = agent.session.snapshotEvents()
     const messages = events.filter(event => event.type === 'assistant/message')
     const attempts = events.filter(event => event.type === 'assistant/attempt')
-    const { usage, complete: usageComplete } = summarizeUsage([...messages, ...attempts].map(event => event.data.usage))
+    const { usage, complete: usageComplete } = summarizeUsage(modelCalls.map(call => call.complete ? call.usage : undefined))
     const text = messages.at(-1)?.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
     let actual
     try { actual = JSON.parse(text) } catch { actual = null }
-    const exactFacts = isDeepStrictEqual(actual, fixture.expected)
-    const requiredTools = toolCalls.some(call => call.name === 'fixture') && (fixture.kind !== 'tap' || toolCalls.some(call => call.name === 'read' && !call.isError))
-    const snapshotRecoveryRequired = fixture.kind === 'tap' && group === 'plugin' &&
+    const exactFacts = phaseResults.length === (fixture.phases?.length ?? 1) && phaseResults.every(phase => phase.passed)
+    const requiredTools = toolCalls.some(call => call.name === (fixture.ptc ? 'run_code' : 'fixture')) &&
+      (!fixture.edit || toolCalls.some(call => ['write', 'edit'].includes(call.name) && !call.isError)) &&
+      (!fixture.requireReadEachPhase || phaseResults.every((_, index) => toolCalls.some(call => call.phase === index && call.name === 'read' && !call.isError))) && (fixture.kind !== 'tap' || toolCalls.some(call => call.name === 'read' && !call.isError))
+    const snapshotRecoveryRequired = (fixture.kind === 'tap' || fixture.requireSnapshot) && group === 'plugin' &&
       (!historyRetirement || retirements.some(record => record.reason === 'retired'))
-    const snapshotRecovered = !snapshotRecoveryRequired || toolCalls.some(call => call.readSnapshot && !call.isError)
-    const passed = exactFacts && requiredTools && snapshotRecovered && !stoppedReason && attempts.length === 0 && steps <= criteria.maxSteps
-    return { task: fixture.id, group, replay, passed, exactFacts, requiredTools, snapshotRecoveryRequired, snapshotRecovered, actual, finalAnswer: text ?? null, startedAt, steps,
-      attempts: attempts.length, usageComplete,
+    const snapshotRecoveryByPhase = phaseResults.map((_, phase) => ({ phase, recovered: toolCalls.some(call => call.phase === phase && call.readSnapshot && !call.isError) }))
+    const snapshotRecovered = !snapshotRecoveryRequired || (fixture.requireSnapshot ? snapshotRecoveryByPhase.every(phase => phase.recovered) : toolCalls.some(call => call.readSnapshot && !call.isError))
+    const passed = exactFacts && requiredTools && snapshotRecovered && !stoppedReason && attempts.length === 0 && steps <= maxSteps
+    const fileCorrect = !fixture.edit || await readFile(source, 'utf8') === fixture.editedText
+    return { task: fixture.id, group, replay, passed: passed && fileCorrect, fileCorrect, exactFacts, requiredTools, snapshotRecoveryRequired, snapshotRecovered, actual, finalAnswer: text ?? null, startedAt, steps,
+      drafts, feedback, correctionCount: feedback.length, attempts: attempts.length, usageComplete, modelCalls, phaseResults, experiments, snapshotRecoveryByPhase,
+      adoptions: collectAdoptions(events, modelCalls),
+      recoveryCalls: toolCalls.filter(call => call.readSnapshot).length,
       usageKind: replay ? 'synthetic-replay' : 'provider-reported', usage,
       estimatedCostUSD: replay || !usageComplete ? null : priceUsage(usage, prices), pricing: prices ?? null,
       elapsedMs: performance.now() - started, stoppedReason, toolCalls,
       ...(historyRetirement ? { historyRetirement, retirements: retirements.map(record => ({ ...record,
         ...(record.reason === 'retired' ? { actualPostRetirementSteps: steps - record.beforeStep + 1 } : {}) })) } : {}),
       decisions: decisions.map(({ strategy, outcome, reason, input, output }) => ({ strategy, outcome, reason, input, output })),
-      configuration: { maxInlineTokens, plugin: group === 'plugin' },
+      configuration: { maxInlineTokens, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: composeWithTunedNative, validationFeedbackLimit },
       turnEnds: events.filter(event => event.type === 'turn/end').map(event => ({ kind: event.data.reason.kind, code: event.data.reason.error?.code })),
     }
+  } catch (error) {
+    const { usage } = summarizeUsage(modelCalls.map(call => call.complete ? call.usage : undefined))
+    return { task: fixture.id, group, replay, passed: false, exactFacts: false, requiredTools: false, fileCorrect: false, snapshotRecovered: false,
+      failure: safeFailure(error), stoppedReason: 'runner-exception', usageComplete: false, usage, modelCalls, phaseResults, drafts, feedback, correctionCount: feedback.length, toolCalls, experiments, retirements,
+      usageKind: replay ? 'synthetic-replay' : 'provider-reported', estimatedCostUSD: null, pricing: prices ?? null, steps, startedAt, elapsedMs: performance.now() - started }
   } finally {
     clearTimeout(timer)
     await ctx.fiber.dispose()
