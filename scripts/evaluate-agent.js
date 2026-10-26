@@ -1,3 +1,5 @@
+import { summarizeUsage, priceUsage } from './evaluation-accounting.js'
+export { summarizeUsage, priceUsage } from './evaluation-accounting.js'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -69,36 +71,6 @@ class ReplayAdapter extends LlmAdapter {
     }
     yield* chunks(block)
   }
-}
-
-const usageFields = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens']
-function validUsage(usage) {
-  return usage !== null && typeof usage === 'object' && usageFields.every((field, index) =>
-    index > 1 && usage[field] === undefined || Number.isSafeInteger(usage[field]) && usage[field] >= 0)
-}
-
-/** Unknown or invalid attempts leave accounting incomplete, never silently free. */
-export function summarizeUsage(records) {
-  const usage = Object.fromEntries(usageFields.map(field => [field, 0]))
-  let complete = records.length > 0
-  for (const record of records) {
-    if (!validUsage(record)) { complete = false; continue }
-    for (const field of usageFields) {
-      const total = usage[field] + (record[field] ?? 0)
-      if (!Number.isSafeInteger(total)) complete = false
-      else usage[field] = total
-    }
-  }
-  return { usage, complete }
-}
-
-/** Explicit-price estimates, never billed charges. Input counts in DSH are disjoint. */
-export function priceUsage(usage, prices) {
-  if (!validUsage(usage)) return null
-  if (!prices || prices.currency !== 'USD' || !['uncached', 'cacheRead', 'output'].every(key => Number.isFinite(prices[key]) && prices[key] >= 0) || !prices.sourceUrl) return null
-  if ((usage.cacheWriteTokens ?? 0) > 0) return null
-  const cost = (usage.inputTokens * prices.uncached + usage.outputTokens * prices.output + (usage.cacheReadTokens ?? 0) * prices.cacheRead) / 1e6
-  return Number.isFinite(cost) ? cost : null
 }
 
 export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs } = {}) {
