@@ -49,18 +49,12 @@ export function apply(ctx, input) {
       const pricing = config.pricing
       if (!pricing?.currency || ['uncachedInputPerMillion', 'cacheReadPerMillion', 'outputPerMillion'].some(key => pricing[key] === undefined)) { reason = 'missing-pricing'; return undefined }
       if (['minimumFutureRequests', 'expectedRecoveryCost', 'safetyMargin', 'maxCallCost', 'futureCacheReadPerMillion'].some(key => config[key] === undefined)) { reason = 'missing-economic-assumptions'; return undefined }
-      // Heuristic conservative admission: treat each permitted prompt byte as one
-      // input token, price every token at the highest declared input rate.
-      // This is an estimate, not a provider-specific token or billing guarantee.
-      callCostUpperEstimate = (config.maxPromptBytes * Math.max(pricing.uncachedInputPerMillion, pricing.cacheReadPerMillion, pricing.cacheWritePerMillion ?? pricing.uncachedInputPerMillion) + config.maxOutputTokens * pricing.outputPerMillion) / 1e6
-      if (!Number.isFinite(callCostUpperEstimate) || callCostUpperEstimate > config.maxCallCost) { reason = 'call-cost-budget'; return undefined }
       const economics = (candidateTokens, compressionCost) => assessNetBenefit({
         originalTokens: original.estimatedTokens, candidateTokens, invalidatedPrefixTokens: 0,
         minimumFutureRequests: config.minimumFutureRequests,
         pricing: { uncachedInputPerMillion: config.futureCacheReadPerMillion, cacheReadPerMillion: config.futureCacheReadPerMillion }, compressionCost,
         expectedRecoveryCost: config.expectedRecoveryCost, safetyMargin: config.safetyMargin,
       })
-      if (!economics(0, callCostUpperEstimate).adopt) { reason = 'no-predicted-benefit-before-call'; return undefined }
       if (config.selectionMode === 'query-dependent') {
         reason = 'query-unavailable'
         queryProvider = ctx.get('freeContextQuery')
@@ -69,13 +63,22 @@ export function apply(ctx, input) {
         if (typeof query !== 'string' || !query.trim() || !query.isWellFormed()) { reason = 'missing-query'; return undefined }
         if (Buffer.byteLength(query) > config.maxQueryBytes) { reason = 'query-byte-budget'; return undefined }
       }
+      const prepared = select.prepare({ kind: config.selectionMode === 'diagnostic-evidence' ? 'diagnostic' : 'prose', text: content[0].text, signal: exec.signal, query })
+      if (prepared.status !== 'prepared') { reason = prepared.reason; return undefined }
+      if (prepared.minimumManifestBytes > config.maxArtifactBytes) { reason = 'manifest-byte-budget'; return undefined }
+      // Heuristic conservative admission: treat each actual serialized prompt byte as one
+      // input token, price every token at the highest declared input rate.
+      // This is an estimate, not a provider-specific token or billing guarantee.
+      callCostUpperEstimate = (prepared.requestBytes * Math.max(pricing.uncachedInputPerMillion, pricing.cacheReadPerMillion, pricing.cacheWritePerMillion ?? pricing.uncachedInputPerMillion) + config.maxOutputTokens * pricing.outputPerMillion) / 1e6
+      if (!Number.isFinite(callCostUpperEstimate) || callCostUpperEstimate > config.maxCallCost) { reason = 'call-cost-budget'; return undefined }
+      if (!economics(0, callCostUpperEstimate).adopt) { reason = 'no-predicted-benefit-before-call'; return undefined }
       const queryIsCurrent = () => !queryProvider || (ctx.get('freeContextQuery') === queryProvider && readQuery(queryProvider, exec) === query)
       const store = ctx.get('spillStore')
       reason = 'snapshot-failed'
       const originalReceipt = await archiveOriginal(store, exec, content[0].text, { maxBytes: config.maxInputBytes })
       const originalReference = tracking.record(exec, originalReceipt, 'original')
       reason = 'selection-failed'
-      selection = await select({ kind: config.selectionMode === 'diagnostic-evidence' ? 'diagnostic' : 'prose', text: content[0].text, session: exec.agent?.session, signal: exec.signal, query })
+      selection = await select.execute(prepared, { session: exec.agent?.session, signal: exec.signal })
       estimatedCost = selection.cacheHit ? 0 : callCost(selection.callUsage, pricing)
       if (!queryIsCurrent()) { reason = 'query-changed'; return undefined }
       if (selection.status !== 'selected') { reason = selection.reason; return undefined }

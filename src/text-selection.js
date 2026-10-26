@@ -64,8 +64,9 @@ export function createTextSelector(options) {
   const protectedTerms = Object.freeze([...options.protectedTerms])
   const configurationKey = JSON.stringify({ strategy, provider, model, ...config, maxQueryBytes, protectedTerms })
   const sessions = new WeakMap()
+  const preparations = new WeakMap()
 
-  return async function select({ kind, text, session, signal, query } = {}) {
+  function prepare({ kind, text, signal, query } = {}) {
     const started = performance.now()
     let usage
     let llmCalled = false
@@ -95,14 +96,6 @@ export function createTextSelector(options) {
     const required = spans.filter(span => prepared?.requiredIds.includes(span.id) || protectedTerms.some(term => span.text.includes(term))).map(span => span.id)
     const sourceHash = prepared?.sourceHash ?? hash(text)
     const cacheKey = hash(`${configurationKey}\n${sourceHash}\n${queryHash ?? ''}`)
-    const cacheable = config.maxCacheEntries > 0 && session !== null && typeof session === 'object'
-    const cache = cacheable ? sessions.get(session) : undefined
-    if (cache?.has(cacheKey)) {
-      const cached = cache.get(cacheKey)
-      cache.delete(cacheKey)
-      cache.set(cacheKey, cached)
-      return { ...cached, callUsage: undefined, cacheHit: true, llmCalled: false, elapsedMs: performance.now() - started }
-    }
     const prompt = [
       diagnostic ? 'Select diagnostic evidence blocks. Retain EVERY required ID, including all status, error, code and location evidence. Omit only unnecessary optional informational blocks.' : selectionMode === 'query-dependent'
         ? 'Select paragraphs needed for the explicitly supplied currentTask, retaining qualifications and evidence relevant to that task.'
@@ -115,6 +108,26 @@ export function createTextSelector(options) {
     const messages = [{ role: 'user', content: [{ type: 'text', text: prompt }] }]
     const requestBytes = Buffer.byteLength(JSON.stringify(messages))
     if (requestBytes > config.maxPromptBytes) return decline('prompt-byte-budget')
+    const token = Object.freeze({ status: 'prepared', requestBytes, minimumManifestBytes: Buffer.byteLength(JSON.stringify({ audit: { request: { provider, model, maxTokens: config.maxOutputTokens, messages } } })) })
+    preparations.set(token, { text, queryHash, diagnostic, prepared, spans, required, sourceHash, cacheKey, prompt, messages })
+    return token
+  }
+
+  async function run(data, session, signal) {
+    const started = performance.now()
+    let usage
+    let llmCalled = false
+    const decline = reason => ({ status: 'declined', reason, callUsage: usage, usageComplete: usage !== undefined,
+      cacheHit: false, llmCalled, elapsedMs: performance.now() - started })
+    const { text, queryHash, diagnostic, prepared, spans, required, sourceHash, cacheKey, prompt, messages } = data
+    const cacheable = config.maxCacheEntries > 0 && session !== null && typeof session === 'object'
+    const cache = cacheable ? sessions.get(session) : undefined
+    if (cache?.has(cacheKey)) {
+      const cached = cache.get(cacheKey)
+      cache.delete(cacheKey)
+      cache.set(cacheKey, cached)
+      return { ...cached, callUsage: undefined, cacheHit: true, llmCalled: false, elapsedMs: performance.now() - started }
+    }
     const controller = new AbortController()
     let timedOut = false
     const onAbort = () => controller.abort()
@@ -223,4 +236,20 @@ export function createTextSelector(options) {
       if (!complete && iterator?.return) Promise.resolve().then(() => iterator.return()).catch(() => {})
     }
   }
+
+  function execute(token, { session, signal } = {}) {
+    const data = preparations.get(token)
+    const declined = reason => ({ status: 'declined', reason, cacheHit: false, llmCalled: false, usageComplete: false, elapsedMs: 0 })
+    if (!data) return Promise.resolve(declined('invalid-preparation'))
+    if (signal?.aborted) return Promise.resolve(declined('aborted'))
+    return run(data, session, signal)
+  }
+
+  async function select(input = {}) {
+    const token = prepare(input)
+    return token.status === 'prepared' ? execute(token, input) : token
+  }
+  select.prepare = prepare
+  select.execute = execute
+  return select
 }

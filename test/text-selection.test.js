@@ -263,3 +263,14 @@ test('accepts authoritative block-end and delta-only text with bounded final byt
   }
   assert.deepEqual((await createTextSelector(config(runtime('temporary', { endText: '{"selectedIds":["p2"]}' })))({ kind: 'prose', text: source })).selectedIds, ['p2'])
 })
+
+test('preparation is pure, opaque, and exposes actual serialized prompt bytes', async () => {
+  const llm = runtime()
+  const select = createTextSelector(config(llm))
+  const prepared = select.prepare({ kind: 'prose', text: source })
+  assert.equal(prepared.status, 'prepared')
+  assert.equal(llm.calls.length, 0)
+  assert.equal((await select.execute({ ...prepared })).reason, 'invalid-preparation')
+  await select.execute(prepared)
+  assert.equal(prepared.requestBytes, Buffer.byteLength(JSON.stringify(llm.calls[0].messages)))
+})

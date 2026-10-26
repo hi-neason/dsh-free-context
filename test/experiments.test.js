@@ -135,10 +135,12 @@ test('cache hits reuse verified selection and origin usage without charging anot
 })
 
 test('complete artifact references and archive budget are included before economic application', async () => {
-  const { handler, events } = setup({ maxArtifactBytes: 1 })
+  const { handler, events, calls, saves } = setup({ maxArtifactBytes: 1 })
   const decision = { kind: 'accept' }
   assert.equal(await handler(execution(), result(), async () => decision), decision)
-  assert.equal(events[0].record.reason, 'manifest-failed')
+  assert.equal(events[0].record.reason, 'manifest-byte-budget')
+  assert.equal(calls.length, 0)
+  assert.equal(saves.length, 0)
 })
 
 
@@ -225,4 +227,17 @@ test('query changes or service replacement during either awaited diagnostic cann
       assert.equal(calls.length, 1)
     }
   }
+})
+
+test('deterministic preparation rejects structured input before storage and prices actual prompt bytes', async () => {
+  const { handler, calls, saves } = setup()
+  const decision = { kind: 'accept' }
+  assert.equal(await handler(execution(), { content: [{ type: 'text', text: '[' + text + ']' }] }, async () => decision), decision)
+  assert.equal(calls.length, 0)
+  assert.equal(saves.length, 0)
+  const admitted = setup({ maxPromptBytes: 10000000, maxCallCost: 0.1 })
+  await admitted.handler(execution(), result(), async () => decision)
+  assert.equal(admitted.calls.length, 1)
+  const report = admitted.events.find(item => item.event === 'free-context/experiment').record
+  assert.equal(report.callCostUpperEstimate, (Buffer.byteLength(JSON.stringify(admitted.calls[0].messages)) + 100) / 1e6)
 })
