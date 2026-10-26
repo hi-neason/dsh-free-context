@@ -390,3 +390,23 @@ test('normally completed streams release slots without needing iterator return',
   for (let index = 0; index < 5; index++) assert.equal((await select({ kind: 'prose', text: source })).status, 'selected')
   assert.equal(llm.calls.length, 5)
 })
+
+test('captured cache selection remains free after eviction and never admits a fresh paid call', async () => {
+  const llm = runtime()
+  const select = createTextSelector({ ...config(llm), maxCacheEntries: 1 })
+  const session = {}
+  const prepared = select.prepare({ kind: 'prose', text: source })
+  assert.equal(select.cached(prepared, { session }), undefined)
+  await select.execute(prepared, { session })
+  const cached = select.cached(prepared, { session })
+  assert.equal(cached.cacheHit, true)
+  assert.equal(cached.llmCalled, false)
+  assert.equal(cached.callUsage, undefined)
+  assert.equal(select.cached(prepared, { session: {} }), undefined)
+  assert.equal(select.cached({}, { session }), undefined)
+  await select({ kind: 'prose', text: source + ' changed', session })
+  assert.equal(select.cached(prepared, { session }), undefined)
+  assert.equal(cached.sourceHash.length, 64)
+  assert.equal(cached.spans[0].text.includes('KEEP'), true)
+  assert.equal(llm.calls.length, 2, 'using captured result after eviction performs no new call')
+})

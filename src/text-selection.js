@@ -296,6 +296,16 @@ export function createTextSelector(options) {
     const token = prepare(input)
     return token.status === 'prepared' ? execute(token, input) : token
   }
+  // Capture the immutable completed result, not just a hit boolean. The caller
+  // can use this exact value after an await even if LRU eviction occurs; it can
+  // never accidentally turn a free admission into a fresh paid model call.
+  select.cached = (token, { session, signal } = {}) => {
+    if (signal?.aborted || session === null || typeof session !== 'object') return undefined
+    const data = preparations.get(token)
+    if (!data) return undefined
+    const cached = sessions.get(session)?.get(data.cacheKey)
+    return cached ? Object.freeze({ ...cached, callUsage: undefined, cacheHit: true, llmCalled: false, elapsedMs: 0 }) : undefined
+  }
   select.prepare = prepare
   select.execute = execute
   return select

@@ -17,6 +17,7 @@ function setup(overrides = {}, behavior = {}) {
   const saves = []
   const calls = []
   const store = { async saveText(input) {
+    await behavior.onSave?.()
     if (behavior.storageFailure) throw new Error('private storage detail')
     saves.push(input)
     return { locator: `spill://fixture/${saves.length}`, bytes: Buffer.byteLength(input.content), retrievalHint: 'Use exact snapshot.' }
@@ -253,4 +254,57 @@ test('simultaneous experiment consumers attribute one paid call and keep origina
   assert.equal(reports.filter(report => report.estimatedCost === 0).length, 1)
   const manifests = saves.filter(save => save.content.startsWith('{"version":1')).map(save => JSON.parse(save.content))
   assert.ok(manifests.every(manifest => manifest.originUsage.inputTokens === 100))
+})
+
+test('explicit native comparator cap bounds both admission and realized savings', async () => {
+  const capped = setup({ comparatorTokenCap: 1200, minimumFutureRequests: 100 })
+  const output = await capped.handler(execution(), result(), async () => ({ kind: 'accept' }))
+  assert.equal(output.content, undefined)
+  assert.equal(capped.calls.length, 0)
+  assert.equal(capped.events.find(event => event.event === 'free-context/experiment').record.reason, 'no-predicted-benefit-before-call')
+  assert.equal(parseExperimentConfig(settings({ comparatorTokenCap: 0 })).comparatorTokenCap, 0)
+  for (const comparatorTokenCap of [-1, 1.5, Infinity]) assert.throws(() => parseExperimentConfig(settings({ comparatorTokenCap })))
+})
+test('completed cache evidence removes fresh-call admission fee without another model call', async () => {
+  const f = setup()
+  const exec = execution()
+  await f.handler(exec, result(), async () => ({ kind: 'accept' }))
+  await f.handler({ ...exec, callId: 'call-2' }, result(), async () => ({ kind: 'accept' }))
+  const records = f.events.filter(event => event.event === 'free-context/experiment').map(event => event.record)
+  assert.ok(records[0].callCostUpperEstimate > 0)
+  assert.equal(records[1].cacheHit, true)
+  assert.equal(records[1].callCostUpperEstimate, 0)
+  assert.equal(records[1].estimatedCost, 0)
+  assert.equal(f.calls.length, 1)
+})
+
+test('a candidate cannot claim savings when native cap makes baseline and candidate equally small', async () => {
+  // Large synthetic horizon permits preflight only; the post-call comparator
+  // must still reject zero incremental savings at the declared one-token cap.
+  const f = setup({ comparatorTokenCap: 1, minimumFutureRequests: 1000000 })
+  const output = await f.handler(execution(), result(), async () => ({ kind: 'accept' }))
+  assert.equal(f.calls.length, 1)
+  assert.equal(output.content, undefined)
+  assert.equal(f.events.find(event => event.event === 'free-context/experiment').record.reason, 'insufficient-net-benefit')
+})
+test('eviction while archiving a captured cache hit cannot turn it into a new paid call', async () => {
+  let evict = false
+  let busy = false
+  const exec = execution()
+  const f = setup({ maxCacheEntries: 1 }, { async onSave() {
+    if (!evict || busy) return
+    busy = true
+    const other = result()
+    other.content[0].text += '\n\nDifferent content creates another selection cache entry.'
+    await f.handler({ ...exec, callId: 'other-source' }, other, async () => ({ kind: 'accept' }))
+  } })
+  await f.handler(exec, result(), async () => ({ kind: 'accept' }))
+  evict = true
+  const output = await f.handler({ ...exec, callId: 'captured-original' }, result(), async () => ({ kind: 'accept' }))
+  assert.ok(output.content[0].text.includes('LOSSY'))
+  const record = f.events.find(event => event.event === 'free-context/experiment' && event.record.callId === 'captured-original').record
+  assert.equal(record.cacheHit, true)
+  assert.equal(record.llmCalled, false)
+  assert.equal(record.estimatedCost, 0)
+  assert.equal(f.calls.length, 2)
 })

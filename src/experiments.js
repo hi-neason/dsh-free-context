@@ -50,7 +50,8 @@ export function apply(ctx, input) {
       if (!pricing?.currency || ['uncachedInputPerMillion', 'cacheReadPerMillion', 'outputPerMillion'].some(key => pricing[key] === undefined)) { reason = 'missing-pricing'; return undefined }
       if (['minimumFutureRequests', 'expectedRecoveryCost', 'safetyMargin', 'maxCallCost', 'futureCacheReadPerMillion'].some(key => config[key] === undefined)) { reason = 'missing-economic-assumptions'; return undefined }
       const economics = (candidateTokens, compressionCost) => assessNetBenefit({
-        originalTokens: original.estimatedTokens, candidateTokens, invalidatedPrefixTokens: 0,
+        originalTokens: Math.min(original.estimatedTokens, config.comparatorTokenCap ?? Infinity),
+        candidateTokens: Math.min(candidateTokens, config.comparatorTokenCap ?? Infinity), invalidatedPrefixTokens: 0,
         minimumFutureRequests: config.minimumFutureRequests,
         pricing: { uncachedInputPerMillion: config.futureCacheReadPerMillion, cacheReadPerMillion: config.futureCacheReadPerMillion }, compressionCost,
         expectedRecoveryCost: config.expectedRecoveryCost, safetyMargin: config.safetyMargin,
@@ -69,7 +70,8 @@ export function apply(ctx, input) {
       // Heuristic conservative admission: treat each actual serialized prompt byte as one
       // input token, price every token at the highest declared input rate.
       // This is an estimate, not a provider-specific token or billing guarantee.
-      callCostUpperEstimate = (prepared.requestBytes * Math.max(pricing.uncachedInputPerMillion, pricing.cacheReadPerMillion, pricing.cacheWritePerMillion ?? pricing.uncachedInputPerMillion) + config.maxOutputTokens * pricing.outputPerMillion) / 1e6
+      const cachedSelection = select.cached(prepared, { session: exec.agent?.session, signal: exec.signal })
+      callCostUpperEstimate = cachedSelection ? 0 : (prepared.requestBytes * Math.max(pricing.uncachedInputPerMillion, pricing.cacheReadPerMillion, pricing.cacheWritePerMillion ?? pricing.uncachedInputPerMillion) + config.maxOutputTokens * pricing.outputPerMillion) / 1e6
       if (!Number.isFinite(callCostUpperEstimate) || callCostUpperEstimate > config.maxCallCost) { reason = 'call-cost-budget'; return undefined }
       if (!economics(0, callCostUpperEstimate).adopt) { reason = 'no-predicted-benefit-before-call'; return undefined }
       const queryIsCurrent = () => !queryProvider || (ctx.get('freeContextQuery') === queryProvider && readQuery(queryProvider, exec) === query)
@@ -78,7 +80,7 @@ export function apply(ctx, input) {
       const originalReceipt = await archiveOriginal(store, exec, content[0].text, { maxBytes: config.maxInputBytes })
       const originalReference = tracking.record(exec, originalReceipt, 'original')
       reason = 'selection-failed'
-      selection = await select.execute(prepared, { session: exec.agent?.session, signal: exec.signal })
+      selection = cachedSelection ?? await select.execute(prepared, { session: exec.agent?.session, signal: exec.signal })
       estimatedCost = (selection.cacheHit || selection.shared) ? 0 : callCost(selection.callUsage, pricing)
       if (!queryIsCurrent()) { reason = 'query-changed'; return undefined }
       if (selection.status !== 'selected') { reason = selection.reason; return undefined }
@@ -111,7 +113,7 @@ export function apply(ctx, input) {
       diagnosticsComplete = await reportDecision(record => ctx.parallel('free-context/experiment', record), warn, {
         tool: exec.name, callId: exec.callId, sessionId: exec.agent?.session?.header?.id,
         mode: config.mode, reason, queryHash: selection?.queryHash, cacheHit: selection?.cacheHit ?? false, llmCalled: selection?.llmCalled ?? false,
-        callUsage: selection?.callUsage, estimatedCost, futureCacheReadPerMillion: config.futureCacheReadPerMillion, currency: config.pricing?.currency, callCostUpperEstimate,
+        callUsage: selection?.callUsage, estimatedCost, comparatorTokenCap: config.comparatorTokenCap, futureCacheReadPerMillion: config.futureCacheReadPerMillion, currency: config.pricing?.currency, callCostUpperEstimate,
       }, { signal: exec.signal })
     }
   }

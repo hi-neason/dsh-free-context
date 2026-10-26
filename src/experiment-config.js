@@ -1,6 +1,6 @@
 const budgets = ['maxInputBytes', 'maxPromptBytes', 'maxOutputBytes', 'maxOutputTokens', 'maxArtifactBytes', 'timeoutMs', 'maxParagraphs']
 const amounts = ['maxCallCost', 'expectedRecoveryCost', 'safetyMargin', 'futureCacheReadPerMillion']
-const keys = ['selectionMode', 'maxQueryBytes', 'mode', 'tools', 'provider', 'model', ...budgets, ...amounts, 'maxCacheEntries', 'maxInFlight', 'protectedTerms', 'pricing', 'minimumFutureRequests', 'minSavingsTokens']
+const keys = ['selectionMode', 'maxQueryBytes', 'mode', 'tools', 'provider', 'model', ...budgets, ...amounts, 'maxCacheEntries', 'maxInFlight', 'protectedTerms', 'pricing', 'minimumFutureRequests', 'minSavingsTokens', 'comparatorTokenCap']
 const priceKeys = ['currency', 'uncachedInputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion', 'outputPerMillion']
 function object(value, allowed, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError(`${label} must be an object`)
@@ -23,7 +23,7 @@ export function parseExperimentConfig(input = {}) {
   config.tools = strings(config.tools, 'tools')
   if (config.tools.some(tool => /\s/.test(tool))) throw new TypeError('Tool names must not contain whitespace')
   config.protectedTerms = strings(config.protectedTerms, 'protectedTerms')
-  for (const key of [...budgets, 'maxQueryBytes', 'maxInFlight', 'maxCacheEntries', 'minimumFutureRequests', 'minSavingsTokens']) if (config[key] !== undefined) number(config[key], key, true)
+  for (const key of [...budgets, 'maxQueryBytes', 'maxInFlight', 'maxCacheEntries', 'minimumFutureRequests', 'minSavingsTokens', 'comparatorTokenCap']) if (config[key] !== undefined) number(config[key], key, true)
   for (const key of amounts) if (config[key] !== undefined) number(config[key], key)
   if (!config.maxInFlight) throw new TypeError('maxInFlight must be positive')
   if (config.safetyMargin !== undefined && config.safetyMargin >= 1) throw new TypeError('safetyMargin must be less than 1')
