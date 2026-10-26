@@ -7,7 +7,7 @@ import { measureContent, reportDecision, safeWarn } from './diagnostics.js'
  * Diagnostic metrics are estimates, never provider billing evidence.
  */
 export function createPostExecuteHandler(transform, warn = () => {}, options = {}) {
-  const { mode = 'observe', report = () => {}, estimator, eligible = () => true } = options
+  const { mode = 'observe', report = () => {}, estimator, eligible = () => true, diagnosticsTimeoutMs = 1000 } = options
   return async (exec, result, next) => {
     const decision = await next()
     const started = performance.now()
@@ -17,7 +17,7 @@ export function createPostExecuteHandler(transform, warn = () => {}, options = {
     let lossy
     let snapshots
     const finish = async (outcome, reason, returned = decision, validate) => {
-      await reportDecision(report, warn, {
+      const completed = await reportDecision(report, warn, {
         tool: exec.name, callId: exec.callId,
         ...(exec.agent?.session?.header?.id !== undefined ? { sessionId: exec.agent.session.header.id } : {}),
         mode, outcome, reason,
@@ -25,8 +25,8 @@ export function createPostExecuteHandler(transform, warn = () => {}, options = {
         ...(snapshots?.length ? { snapshots } : {}),
         ...(input ? { input } : {}), ...(output ? { output } : {}),
         estimateKind: 'serialized-content-utf8-heuristic', elapsedMs: performance.now() - started,
-      })
-      if (exec.signal?.aborted) return decision
+      }, { signal: exec.signal, timeoutMs: diagnosticsTimeoutMs })
+      if (!completed || exec.signal?.aborted) return decision
       if (validate) {
         try {
           const valid = validate()

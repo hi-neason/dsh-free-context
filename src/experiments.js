@@ -41,6 +41,7 @@ export function apply(ctx, input) {
     let callCostUpperEstimate
     let query
     let queryProvider
+    let diagnosticsComplete = false
     try {
       if (content.length !== 1 || content[0].type !== 'text' || typeof content[0].text !== 'string') return undefined
       const original = measureContent(content)
@@ -99,16 +100,16 @@ export function apply(ctx, input) {
       if (output.bytes >= original.bytes || output.estimatedTokens >= original.estimatedTokens || original.estimatedTokens - output.estimatedTokens < config.minSavingsTokens) { reason = 'insufficient-size-savings'; return undefined }
       if (!economics(output.estimatedTokens, estimatedCost).adopt) { reason = 'insufficient-net-benefit'; return undefined }
       reason = config.mode === 'apply' ? 'selected' : 'observed'
-      return { content: replacement, strategy: selection.strategy, lossy: true, validate: queryIsCurrent, snapshots: [originalReference, auditReference].filter(Boolean) }
+      return { content: replacement, strategy: selection.strategy, lossy: true, validate: () => diagnosticsComplete && queryIsCurrent(), snapshots: [originalReference, auditReference].filter(Boolean) }
     } catch {
       if (exec.signal?.aborted) reason = 'aborted'
       return undefined
     } finally {
-      await reportDecision(record => ctx.parallel('free-context/experiment', record), warn, {
+      diagnosticsComplete = await reportDecision(record => ctx.parallel('free-context/experiment', record), warn, {
         tool: exec.name, callId: exec.callId, sessionId: exec.agent?.session?.header?.id,
         mode: config.mode, reason, queryHash: selection?.queryHash, cacheHit: selection?.cacheHit ?? false, llmCalled: selection?.llmCalled ?? false,
         callUsage: selection?.callUsage, estimatedCost, futureCacheReadPerMillion: config.futureCacheReadPerMillion, currency: config.pricing?.currency, callCostUpperEstimate,
-      })
+      }, { signal: exec.signal })
     }
   }
   ctx.on('tools/post-execute', createPostExecuteHandler(transform, warn, {

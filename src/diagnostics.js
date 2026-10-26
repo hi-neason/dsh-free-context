@@ -1,3 +1,5 @@
+import { waitForBoundary } from './async-boundary.js'
+
 /** Estimate serialized content cost, not tokenizer/provider usage or billing. */
 export function estimateTokens(bytes) {
   return Math.ceil(bytes / 3)
@@ -16,8 +18,20 @@ export function safeWarn(warn, message) {
 }
 
 /** Emit only explicit metadata fields; never include content, arguments or exception text. */
-export async function reportDecision(report, warn, record) {
-  try { await report(Object.freeze(record)) } catch {
+export async function reportDecision(report, warn, record, { signal, timeoutMs = 1000 } = {}) {
+  try {
+    // Invoke even when already cancelled so synchronous observers can record
+    // the skip reason, but never wait indefinitely for their asynchronous work.
+    const pending = Promise.resolve(report(Object.freeze(record)))
+    pending.catch(() => {})
+    await waitForBoundary(() => pending, { signal, timeoutMs })
+    return true
+  } catch (error) {
+    if (signal?.aborted || error?.code === 'BOUNDARY_TIMEOUT') {
+      safeWarn(warn, 'dsh-free-context: diagnostic wait interrupted; keeping original content')
+      return false
+    }
     safeWarn(warn, 'dsh-free-context: diagnostic observer failed')
+    return true
   }
 }

@@ -104,3 +104,32 @@ test('abort during an observer preserves the prior decision and reports selectio
   assert.equal(JSON.stringify(records).includes('committed'), false)
   assert.equal(JSON.stringify(records).includes('applied'), false)
 })
+
+test('cancellation releases a pipeline blocked by a diagnostic observer', async () => {
+  const controller = new AbortController()
+  let started, release
+  const began = new Promise(resolve => { started = resolve })
+  const decision = { kind: 'accept' }
+  const handler = createPostExecuteHandler(candidate, undefined, { mode: 'apply', report: () => {
+    started(); return new Promise(resolve => { release = resolve })
+  } })
+  const operation = handler({ ...exec(), signal: controller.signal }, result(), async () => decision)
+  await began
+  controller.abort()
+  const outcome = await Promise.race([operation, new Promise(resolve => setTimeout(() => resolve('still-waiting'), 50))])
+  release()
+  assert.equal(outcome, decision)
+})
+
+
+test('diagnostic deadline preserves original and observes late rejection', async () => {
+  const decision = { kind: 'accept' }
+  let rejectObserver
+  const handler = createPostExecuteHandler(candidate, undefined, {
+    mode: 'apply', diagnosticsTimeoutMs: 5,
+    report: () => new Promise((resolve, reject) => { rejectObserver = reject }),
+  })
+  assert.equal(await handler(exec(), result(), async () => decision), decision)
+  rejectObserver(new Error('late observer failure'))
+  await new Promise(resolve => setImmediate(resolve))
+})
