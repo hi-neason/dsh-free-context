@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { agentCompletion, agentFixtures, groups, runAgentFixture } from './evaluate-agent.js'
+import { retirementEvidenceHash } from './calibrate-retirement.js'
 
 // Declared before execution, deliberately testable against actual remaining requests.
 export const retirementAssumptions = Object.freeze({ enabled: true, tools: ['fixture'], retainRecentResults: 0,
@@ -20,7 +21,10 @@ export async function evaluateRetirement(options = {}) {
   const plugin = tasks.find(task => task.group === 'plugin')
   const activated = plugin.retirements.some(record => record.reason === 'retired')
   const completion = agentCompletion(tasks, options)
+  const { answer, ...fixtureEvidence } = fixture
   return { evaluationKind: options.replay ? 'history-retirement-agent-replay' : 'history-retirement-live-agent',
+    model: options.model ?? 'deepseek-flash', runId: options.runId ?? null, provenance: options.provenance ?? null,
+    fixture: fixtureEvidence, fixtureHash: retirementEvidenceHash(fixtureEvidence), policyHash: retirementEvidenceHash(retirementAssumptions),
     scenario: 'optimistic-forecast-stress',
     rationale: 'The first declared 100-request horizon was rejected by the live economic gate. A declared 200-request stress horizon activates the rewrite to test recovery and accounting, not forecast accuracy or realistic savings.',
     assumptions: retirementAssumptions, assumptionPriceBasis: { model: 'deepseek-flash', currency: 'USD', ratePeriod: 'peak', verifiedDate: '2026-10-23', sourceUrl: 'https://api-docs.deepseek.com/quick_start/pricing/' }, groupOrder: groups, ...completion,
