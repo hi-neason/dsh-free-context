@@ -410,3 +410,32 @@ test('captured cache selection remains free after eviction and never admits a fr
   assert.equal(cached.spans[0].text.includes('KEEP'), true)
   assert.equal(llm.calls.length, 2, 'using captured result after eviction performs no new call')
 })
+
+test('all selector modes send only exact ID/text and retain local source validation metadata', async () => {
+  for (const selectionMode of ['task-independent', 'query-dependent', 'diagnostic-evidence']) {
+    const diagnostic = selectionMode === 'diagnostic-evidence'
+    const text = diagnostic ? diagnostics : source
+    const llm = runtime(JSON.stringify({ selectedIds: diagnostic ? ['d1', 'd3', 'd4'] : ['p2'] }))
+    const select = createTextSelector({ ...config(llm), selectionMode, maxQueryBytes: 100, protectedTerms: diagnostic ? [] : ['KEEP'] })
+    const prepared = select.prepare({ kind: diagnostic ? 'diagnostic' : 'prose', text, query: 'Check protected evidence' })
+    const selected = await select.execute(prepared)
+    assert.equal(selected.status, 'selected')
+    const payload = JSON.parse(llm.calls[0].messages[0].content[0].text.split('\n').at(-1))
+    const blocks = payload.sourceBlocks ?? payload.paragraphs
+    for (const block of blocks) assert.deepEqual(Object.keys(block).sort(), ['id', 'text'])
+    assert.deepEqual(payload.requiredIds, diagnostic ? ['d1', 'd3', 'd4'] : ['p2'])
+    assert.equal(payload.currentTask, selectionMode === 'query-dependent' ? 'Check protected evidence' : undefined)
+    for (const span of selected.spans) {
+      assert.equal(span.text, text.slice(span.start, span.end))
+      assert.deepEqual(blocks.find(block => block.id === span.id), { id: span.id, text: span.text })
+    }
+    if (diagnostic) {
+      assert.equal(selected.spans[0].startLine, 1)
+      assert.equal(selected.spans[0].endLine, 2)
+      assert.ok(selected.spans[0].guards.codes.includes('TS2322'))
+      assert.ok(selected.spans[0].guards.locations.includes('src/caller.ts:8:2'))
+    }
+    assert.equal(prepared.requestBytes, Buffer.byteLength(JSON.stringify(llm.calls[0].messages)))
+    assert.deepEqual(selected.audit.request.messages, llm.calls[0].messages)
+  }
+})
