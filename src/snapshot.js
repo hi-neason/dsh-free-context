@@ -65,10 +65,16 @@ export async function archiveOriginal(store, exec, text, {
   return Object.freeze({ sessionId, callId, toolName, sha256, bytes, locator, retrievalHint })
 }
 
+/** Stable public identifier; it grants no access without a session registration. */
+export function snapshotReferenceId(receipt) {
+  return createHash('sha256').update(JSON.stringify([receipt.locator, receipt.sha256])).digest('hex')
+}
+
 /** Render an opaque backend reference; never derive a filesystem path from it. */
 export function formatSnapshotReference(receipt) {
   return [
     `Original tool-result snapshot: ${JSON.stringify(receipt)}`,
+    `Snapshot referenceId: ${snapshotReferenceId(receipt)}. If free_context_recall is installed, use this registered ID for verified Unicode pages.`,
     'Use the backend retrievalHint to retrieve this exact snapshot. Use existing read/grep tools when supported by that backend; read all pages for full recovery. Do not substitute the current source file.',
     'For full recovery, verify the UTF-8 byte count and SHA-256 of the complete retrieved text against this receipt. A partial read or grep match does not verify the full snapshot.',
   ].join('\n')

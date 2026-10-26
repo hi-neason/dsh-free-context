@@ -1,4 +1,4 @@
-import { installSnapshotTracking } from './snapshot-telemetry.js'
+import { getSnapshotTracking } from './snapshot-telemetry.js'
 import { parseExperimentConfig } from './experiment-config.js'
 export { Config } from './experiment-config.js'
 import { createTextSelector } from './text-selection.js'
@@ -31,7 +31,7 @@ function readQuery(provider, exec) {
 export function apply(ctx, input) {
   const config = parseExperimentConfig(input)
   if (config.mode === 'off' || !config.tools.length) return
-  const tracking = installSnapshotTracking(ctx)
+  const tracking = getSnapshotTracking(ctx)
   const select = createTextSelector({ ...config, llm: ctx.llm })
   const warn = message => ctx.logger.warn(message)
   const transform = async (content, exec) => {

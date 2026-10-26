@@ -14,7 +14,8 @@
     "./experiments": "./src/experiments.js",
     "./text-selection": "./src/text-selection.js",
     "./diagnostic-evidence": "./src/diagnostic-evidence.js",
-    "./recovery": "./src/recovery.js"
+    "./recovery": "./src/recovery.js",
+    "./recovery-tool": "./src/recovery-tool.js"
   },
   "files": [
     "src",

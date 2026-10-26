@@ -1,4 +1,4 @@
-import { installSnapshotTracking } from './snapshot-telemetry.js'
+import { getSnapshotTracking } from './snapshot-telemetry.js'
 import { isEligibleInput, parseConfig } from './config.js'
 export { Config } from './config.js'
 import { createContentRouter } from './router.js'
@@ -13,7 +13,7 @@ export const inject = ['tools']
 export function apply(ctx, input) {
   const config = parseConfig(input)
   if (config.mode === 'off') return
-  const snapshotTracking = config.retirement.enabled || (config.tools.length && config.logs.enabled) ? installSnapshotTracking(ctx) : undefined
+  const snapshotTracking = config.retirement.enabled || (config.tools.length && config.logs.enabled) ? getSnapshotTracking(ctx) : undefined
   if (config.retirement.enabled) {
     const readTracking = config.retirement.tools.includes('read') ? installReadTracking(ctx) : undefined
     installRetirement(ctx, config.retirement, { readTracking, mode: config.mode, onSnapshot: snapshotTracking?.record,

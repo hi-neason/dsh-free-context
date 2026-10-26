@@ -54,3 +54,21 @@ test('bounded eviction, explicit re-registration, disposal and throwing observer
   tracking.dispose()
   assert.equal(tracking.record(exec,receipt),undefined)
 })
+
+test('lookup returns frozen original receipt only for registered owner and honors eviction/disposal', () => {
+  const { tracking, exec, receipt } = setup({ maxEntriesPerSession: 1 })
+  const reference = tracking.record(exec, receipt)
+  const saved = tracking.lookup(exec, reference.referenceId)
+  assert.deepEqual(saved, receipt)
+  assert.equal(Object.isFrozen(saved), true)
+  receipt.locator = '/mutated'
+  assert.equal(saved.locator, '/private/exact')
+  assert.equal(tracking.lookup({ ...exec, agent: { session: { header: { id: 'session' } } } }, reference.referenceId), undefined)
+  exec.agent.session.header.id = 'other'
+  assert.equal(tracking.lookup(exec, reference.referenceId), undefined)
+  exec.agent.session.header.id = 'session'
+  tracking.record(exec, receipt)
+  assert.equal(tracking.lookup(exec, reference.referenceId), undefined)
+  tracking.dispose()
+  assert.equal(tracking.lookup(exec, reference.referenceId), undefined)
+})

@@ -24,7 +24,7 @@ function setup(overrides = {}, behavior = {}) {
   let handler
   const ctx = {
     on: (_event, callback) => { handler = callback }, logger: { warn() {} },
-    get: name => name === 'freeContextQuery' ? behavior.queryProvider : behavior.noStore ? undefined : store,
+    get: name => name === 'freeContextQuery' ? behavior.queryProvider : name === 'spillStore' && !behavior.noStore ? store : undefined,
     parallel: async (event, record) => { if (['free-context/experiment', 'free-context/decision'].includes(event)) events.push({ event, record }); await behavior.onReport?.(event) },
     llm: { async * stream(request) {
       calls.push(request)
