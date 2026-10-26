@@ -4,17 +4,23 @@ import { summarizeAcceptanceV2 } from './acceptance-benchmark-v2.js'
 import { calibrateRetirementReports, inspectRetirementReport, retirementEvidenceHash } from './calibrate-retirement.js'
 import { priceUsage } from './evaluation-accounting.js'
 
-/** A digest pinned before evaluation binds the historical counterexample. */
-export function verifyShortHorizonBacktest({ report, expectedReportHash } = {}) {
+/** Pin the existing historical report's digest before running this backtest.
+ * The supplied calibration must be freshly derived from validated raw reports.
+ */
+export function verifyShortHorizonBacktest({ report, expectedReportHash } = {}, calibration) {
   const failed = reason => ({ passed: false, reason })
   if (!/^[a-f0-9]{64}$/.test(expectedReportHash ?? '') || retirementEvidenceHash(report) !== expectedReportHash) return failed('unbound-backtest')
   const evidence = inspectRetirementReport(report)
   if (evidence.status !== 'validated') return failed(evidence.reason)
+  if (calibration?.status !== 'calibrated' || calibration.scope !== evidence.scope ||
+      !Number.isSafeInteger(calibration.minimumFutureRequests) || calibration.minimumFutureRequests < 0 ||
+      !Number.isFinite(calibration.expectedRecoveryCost) || calibration.expectedRecoveryCost < 0) return failed('missing-or-inapplicable-calibration')
   const plugin = report.tasks.find(task => task.group === 'plugin')
   const tuned = report.tasks.find(task => task.group === 'baseline-tuned')
   const actualExtraCost = priceUsage(plugin.usage, plugin.pricing) - priceUsage(tuned.usage, tuned.pricing)
   if (!(actualExtraCost > 0) || evidence.observation.remainingRequests > 2 || report.assumptions.minimumFutureRequests !== 200) return failed('not-short-negative-counterexample')
   const decisions = []
+  const calibratedDecisions = []
   for (const record of plugin.retirements.filter(item => item.reason === 'retired')) {
     const original = record.economics
     if (!original || original.minimumFutureRequests !== 200 || original.adopt !== true ||
@@ -28,14 +34,22 @@ export function verifyShortHorizonBacktest({ report, expectedReportHash } = {}) 
         pricing: { uncachedInputPerMillion: plugin.pricing.uncached, cacheReadPerMillion: plugin.pricing.cacheRead } }
       if (!assessNetBenefit({ ...input, minimumFutureRequests: 200, expectedRecoveryCost: original.expectedRecoveryCost }).adopt) return failed('inconsistent-original-decision')
       decisions.push(assessNetBenefit({ ...input, minimumFutureRequests: evidence.observation.remainingRequests, expectedRecoveryCost: evidence.observation.recoveryCost }))
+      // Mirror the production tightening rule; the prediction must reject the
+      // counterexample without using its observed future horizon/recovery.
+      calibratedDecisions.push(assessNetBenefit({ ...input,
+        minimumFutureRequests: Math.min(original.minimumFutureRequests, calibration.minimumFutureRequests),
+        expectedRecoveryCost: Math.max(original.expectedRecoveryCost, calibration.expectedRecoveryCost) }))
     } catch { return failed('invalid-economic-inputs') }
   }
-  return { passed: decisions.length > 0 && decisions.every(decision => decision.adopt === false), actualExtraCost, decisions }
+  const hindsightPassed = decisions.length > 0 && decisions.every(decision => decision.adopt === false)
+  const calibratedPassed = calibratedDecisions.length > 0 && calibratedDecisions.every(decision => decision.adopt === false)
+  return { passed: hindsightPassed && calibratedPassed, hindsightPassed, calibratedPassed, actualExtraCost, decisions, calibratedDecisions }
 }
 
 /** Original fourteen-feature gate, separate from the frozen v2 benchmark gate.
- * expectedRunIds and expectedReportHash are caller-pinned protocol inputs; callers
- * must freeze them BEFORE collecting results. No local validator can authenticate
+ * Freeze expectedRunIds before collecting calibration runs. Pin the existing
+ * historical negative report's expectedReportHash before running its backtest.
+ * No local validator can authenticate
  * a fabricated provider transcript or detect deliberately hidden runs outside that plan.
  */
 export function originalAcceptance(report, calibrationEvidence, negativeBacktest) {
@@ -50,7 +64,7 @@ export function originalAcceptance(report, calibrationEvidence, negativeBacktest
     Array.isArray(reports) && isDeepStrictEqual(reports.map(item => item?.runId).sort(), [...expectedRunIds].sort())
   const comparableEnvironment = membershipComplete && reports.every(item => item && isDeepStrictEqual(item.provenance, report?.provenance) && item.model === report?.pricing?.model && Array.isArray(item.tasks) && item.tasks.every(task => isDeepStrictEqual(task?.pricing, report.pricing)))
   const calibration = comparableEnvironment ? calibrateRetirementReports(reports) : { status: 'declined', reason: membershipComplete ? 'incomparable-benchmark-environment' : 'incomplete-frozen-membership' }
-  const backtest = verifyShortHorizonBacktest(negativeBacktest)
+  const backtest = verifyShortHorizonBacktest(negativeBacktest, calibration)
   const calibrationEvidenceComplete = calibration.status === 'calibrated'
   return { accepted: benchmarkAccepted && calibrationEvidenceComplete && backtest.passed,
     benchmarkAccepted, calibrationEvidenceComplete, shortHorizonBacktestPassed: backtest.passed, calibration, backtest,

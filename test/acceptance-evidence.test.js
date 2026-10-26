@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createAcceptancePlanV2 } from '../scripts/acceptance-benchmark-v2.js'
 import { originalAcceptance, verifyShortHorizonBacktest } from '../scripts/acceptance-evidence.js'
-import { retirementEvidenceHash } from '../scripts/calibrate-retirement.js'
+import { calibrateRetirementReports, retirementEvidenceHash } from '../scripts/calibrate-retirement.js'
 
 // All data here is synthetic contract-test data. It proves no real model benefit.
 const pricing = { currency: 'USD', model: 'model', verifiedDate: '2026-10-26', ratePeriod: 'test', sourceUrl: 'https://example.test/prices', uncached: .3, cacheRead: .006, output: 1.2 }
@@ -63,10 +63,34 @@ test('missing planned runs, duplicate evidence and changed backtest inputs rejec
   }
 })
 test('backtest requires observed loss, short horizon and a genuine conservative rejection', () => {
-  const { backtest } = evidence()
-  assert.equal(verifyShortHorizonBacktest(backtest).passed, true)
+  const { backtest, calibration } = evidence()
+  const forecast = calibrateRetirementReports(calibration.reports)
+  assert.equal(verifyShortHorizonBacktest(backtest, forecast).passed, true)
+  assert.equal(verifyShortHorizonBacktest(backtest).passed, false)
+  assert.equal(verifyShortHorizonBacktest(backtest, { ...forecast, scope: 'other-workload' }).passed, false)
   backtest.report.tasks[2].usage = backtest.report.tasks[1].usage
   backtest.report.tasks[2].modelCalls = backtest.report.tasks[1].modelCalls
   backtest.expectedReportHash = retirementEvidenceHash(backtest.report)
-  assert.equal(verifyShortHorizonBacktest(backtest).passed, false)
+  assert.equal(verifyShortHorizonBacktest(backtest, forecast).passed, false)
+})
+
+test('hindsight rejection cannot pass when the derived calibration would still adopt the negative case', () => {
+  const data = evidence()
+  for (const report of data.calibration.reports) for (const task of report.tasks) {
+    task.steps = 8
+    task.retirements[0].actualPostRetirementSteps = 8
+    task.modelCalls = Array.from({ length: 8 }, (_, index) => ({ ...task.modelCalls[0], id: index + 1, agentStep: index + 1,
+      visibleToolResults: index >= 6 ? [{ callId: 'read-1' }] : [],
+      usage: { inputTokens: 0, outputTokens: index >= 6 ? 1 : 0, cacheReadTokens: 0, cacheWriteTokens: 0 } }))
+    task.usage = { inputTokens: 0, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  }
+  data.backtest.report.tasks[2].retirements[0].economics.cacheRebuildCost = .000025
+  data.backtest.expectedReportHash = retirementEvidenceHash(data.backtest.report)
+  const result = originalAcceptance(benchmark(), data.calibration, data.backtest)
+  assert.equal(result.calibration.minimumFutureRequests, 8)
+  assert.equal(result.calibration.expectedRecoveryCost, .0000024)
+  assert.equal(result.accepted, false)
+  assert.equal(result.backtest.hindsightPassed, true)
+  assert.equal(result.backtest.calibratedPassed, false)
+  assert.equal(result.backtest.calibratedDecisions[0].adopt, true)
 })
