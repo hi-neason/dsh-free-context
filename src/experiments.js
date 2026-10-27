@@ -113,7 +113,9 @@ export function apply(ctx, input) {
       const manifestReceipt = await archiveOriginal(store, exec, manifest, { maxBytes: config.maxArtifactBytes })
       const auditReference = tracking.record(exec, manifestReceipt, 'audit')
       const text = [`[LOSSY ${config.selectionMode === 'diagnostic-evidence' ? 'diagnostic evidence' : 'paragraph'} selection; policy ${selection.strategy}. Extracted source spans do not prove complete evidence.]`,
-        selection.text, formatSnapshotReference(originalReceipt),
+        selection.text,
+        'The retained excerpts quote the source verbatim. Answer from them when sufficient; recover the original for missing evidence, completeness checks, or requested verification.',
+        formatSnapshotReference(originalReceipt),
         'Auxiliary selection audit manifest (full request, response and usage):', formatSnapshotReference(manifestReceipt)].join('\n\n')
       const replacement = [{ ...content[0], text }]
       const output = measureContent(replacement)
