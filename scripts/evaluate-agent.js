@@ -171,8 +171,18 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       delivered = text
       const reference = text.match(/Original tool-result snapshot: (\{[^\n]+\})/)
       if (reference) snapshotPath = JSON.parse(reference[1]).locator
+      let readWindow
+      if (exec.name === 'read') {
+        const requested = Object.fromEntries(['offset', 'limit'].filter(key => Number.isSafeInteger(exec.arguments[key]) && exec.arguments[key] >= 1).map(key => [key, exec.arguments[key]]))
+        const value = Object.hasOwn(decision, 'value') ? decision.value : result.value
+        const knownRange = Number.isSafeInteger(value?.offset) && value.offset >= 1 && Number.isSafeInteger(value.totalLines) && value.totalLines >= 0 &&
+          Array.isArray(value.lines) && value.lines.every((line, index) => line?.number === value.offset + index && line.number <= value.totalLines)
+        readWindow = { requested, returned: knownRange ? { offset: value.offset, lineCount: value.lines.length, totalLines: value.totalLines,
+          coversAllReportedLines: value.offset === 1 && value.lines.length === value.totalLines } : null,
+          contentReplaced: Object.hasOwn(decision, 'content'), valueReplaced: Object.hasOwn(decision, 'value'), byteVerified: false }
+      }
       toolCalls.push({ callId: exec.callId, name: exec.name, phase: phaseIndex, bytes: Buffer.byteLength(text), isError: result.isError === true,
-        ...(exec.name === 'read' ? { readSnapshot: exec.arguments.file_path === snapshotPath, readOriginal: exec.arguments.file_path === source } : {}) })
+        ...(exec.name === 'read' ? { readSnapshot: exec.arguments.file_path === snapshotPath, readOriginal: exec.arguments.file_path === source, readWindow } : {}) })
       return decision
     }, { prepend: true })
     ctx.tools.register(defineContentToolFixture({ name: 'fixture', description: 'Return immutable evaluation dataset.', parameters: {}, execute: async () => [{ type: 'text', text: fixture.text }] }))
