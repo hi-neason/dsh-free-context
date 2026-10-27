@@ -203,7 +203,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
         const issues = []
         if (!turnCompleted || !phaseMessages.length) issues.push('This phase did not produce a fresh answer in a completed turn.')
         if (!parsed) issues.push('Return the requested JSON object only, without prose or Markdown.')
-        if (!toolCalls.some(call => call.name === (fixture.ptc ? 'run_code' : 'fixture') && !call.isError)) issues.push('Use the required fixture tool before answering.')
+        if (!toolCalls.some(call => call.name === (fixture.ptc ? 'run_code' : 'fixture') && !call.isError && (!fixture.requireFixtureEachPhase || call.phase === index))) issues.push('Use the required fixture tool in this phase before answering.')
         if (fixture.requireReadEachPhase && !toolCalls.some(call => call.phase === index && call.name === 'read' && !call.isError)) issues.push('Read the required source in this phase before answering.')
         const needsSnapshot = group === 'plugin' && (fixture.kind === 'tap' || fixture.requireSnapshot) && (!historyRetirement || retirements.some(record => record.reason === 'retired'))
         if (needsSnapshot && !toolCalls.some(call => call.phase === index && call.readSnapshot && !call.isError)) issues.push('Read the ORIGINAL snapshot locator from the latest tool result or retirement replacement in history now. Do not call fixture again or substitute the user original file.')
@@ -227,6 +227,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     try { actual = JSON.parse(text) } catch { actual = null }
     const exactFacts = phaseResults.length === (fixture.phases?.length ?? 1) && phaseResults.every(phase => phase.passed)
     const requiredTools = toolCalls.some(call => call.name === (fixture.ptc ? 'run_code' : 'fixture')) &&
+      (!fixture.requireFixtureEachPhase || phaseResults.every((_, phase) => toolCalls.some(call => call.phase === phase && call.name === (fixture.ptc ? 'run_code' : 'fixture') && !call.isError))) &&
       (!fixture.edit || toolCalls.some(call => ['write', 'edit'].includes(call.name) && !call.isError)) &&
       (!fixture.requireReadEachPhase || phaseResults.every((_, index) => toolCalls.some(call => call.phase === index && call.name === 'read' && !call.isError))) && (fixture.kind !== 'tap' || toolCalls.some(call => call.name === 'read' && !call.isError))
     const snapshotRecoveryRequired = (fixture.kind === 'tap' || fixture.requireSnapshot) && group === 'plugin' &&
