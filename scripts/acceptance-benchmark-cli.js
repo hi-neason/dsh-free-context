@@ -6,6 +6,7 @@ import { resolve, join, dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { evaluateAcceptance, acceptanceCriteria } from './acceptance-benchmark.js'
 import { evaluateAcceptanceV2, acceptanceCriteriaV2 } from './acceptance-benchmark-v2.js'
+import { evaluateAcceptanceV3, acceptanceCriteriaV3 } from './acceptance-benchmark-v3.js'
 
 /** Hash actual source/fixtures, including uncommitted changes, before any provider call. */
 export async function acceptanceSourceHash(root) {
@@ -37,9 +38,9 @@ export async function main(args = process.argv.slice(2)) {
     values[key] = args[++index]
   }
   const version = values['--version'] ?? '1'
-  if (!['1', '2'].includes(version)) throw new TypeError('Benchmark version must be 1 or 2')
-  const evaluate = version === '2' ? evaluateAcceptanceV2 : evaluateAcceptance
-  const criteria = version === '2' ? acceptanceCriteriaV2 : acceptanceCriteria
+  if (!['1', '2', '3'].includes(version)) throw new TypeError('Benchmark version must be 1, 2 or 3')
+  const evaluate = version === '3' ? evaluateAcceptanceV3 : version === '2' ? evaluateAcceptanceV2 : evaluateAcceptance
+  const criteria = version === '3' ? acceptanceCriteriaV3 : version === '2' ? acceptanceCriteriaV2 : acceptanceCriteria
   if (live && (!values['--credential-file'] || !values['--pricing-file'])) throw new TypeError('Live benchmark requires credential and pricing files')
   const root = fileURLToPath(new URL('..', import.meta.url))
   const output = resolve(values['--output'] ?? join(root, '.omx/acceptance/benchmark-replay.json'))
@@ -60,6 +61,9 @@ export async function main(args = process.argv.slice(2)) {
     cacheCondition: criteria.cacheCondition }
   const report = await evaluate({ replay: !live, key, pricing, provenance,
     ...(values['--seed'] !== undefined ? { seed: Number(values['--seed']) } : {}),
+    onPlan: async frozen => {
+      await writeFile(`${output}.plan.json`, JSON.stringify(frozen, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
+    },
     onResult: async record => {
       await appendFile(journal, JSON.stringify(record) + '\n')
       console.log(`${record.runId}: ${record.passed ? 'quality-pass' : 'quality-fail'}; calls=${record.modelCalls?.length ?? 0}; usage=${record.usageComplete === true ? 'complete' : 'incomplete'}`)

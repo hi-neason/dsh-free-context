@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { main, acceptanceSourceHash } from '../scripts/acceptance-benchmark-cli.js'
 
 test('acceptance CLI rejects ambiguous routing and missing live credentials before I/O', async () => {
-  for (const args of [['--live'], ['--live', '--live'], ['--credential-file'], ['--unknown'], ['--seed', '1', '--seed', '2'], ['--version', '3']]) {
+  for (const args of [['--live'], ['--live', '--live'], ['--credential-file'], ['--unknown'], ['--seed', '1', '--seed', '2'], ['--version', '4']]) {
     await assert.rejects(main(args), TypeError)
   }
 })
@@ -29,5 +29,5 @@ test('existing output refuses live execution before credential or provider work'
   t.after(() => rm(directory, { recursive: true, force: true }))
   const output = join(directory, 'existing.json')
   await writeFile(output, '{"preserve":true}')
-  await assert.rejects(main(['--live', '--credential-file', join(directory, 'missing-key'), '--pricing-file', join(directory, 'missing-prices'), '--output', output]), error => error.code === 'EEXIST')
+  for (const version of ['1', '2', '3']) await assert.rejects(main(['--version', version, '--live', '--credential-file', join(directory, 'missing-key'), '--pricing-file', join(directory, 'missing-prices'), '--output', output]), error => error.code === 'EEXIST')
 })
