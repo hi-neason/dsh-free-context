@@ -1,7 +1,7 @@
 import { containsPlaceholder } from './evaluation-contract.js'
 import { validUsage, summarizeUsage, priceUsage, safeFailure } from './evaluation-accounting.js'
 export { summarizeUsage, priceUsage } from './evaluation-accounting.js'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -96,10 +96,12 @@ export function collectAdoptions(events, modelCalls) {
 export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs, experimentalConfig, adapterFactory, maxSteps = criteria.maxSteps, configureContext, composeWithTunedNative = false, validationFeedbackLimit = 0 } = {}) {
   if (!Number.isSafeInteger(validationFeedbackLimit) || validationFeedbackLimit < 0 || validationFeedbackLimit > 2) throw new TypeError('Validation feedback limit must be 0..2')
   if (fixture.rejectPlaceholderValues !== undefined && typeof fixture.rejectPlaceholderValues !== 'boolean') throw new TypeError('Placeholder response contract must be boolean')
+  if (fixture.discoverSourcePath !== undefined && typeof fixture.discoverSourcePath !== 'boolean') throw new TypeError('Source discovery must be boolean')
   if (!groups.includes(group)) throw new TypeError('Unknown evaluation group')
   if (!replay && !key) throw new TypeError('Missing explicit credential')
   const directory = await mkdtemp(join(tmpdir(), 'dsh-agent-eval-'))
-  const source = join(directory, 'original.txt')
+  const source = join(directory, fixture.discoverSourcePath ? `source-${randomUUID()}.txt` : 'original.txt')
+  const fixtureContent = fixture.discoverSourcePath ? `${fixture.text}\n\nOriginal fixture path: ${source}` : fixture.text
   await writeFile(source, fixture.text)
   const ctx = new Context()
   let agent
@@ -187,7 +189,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
         ...(exec.name === 'read' ? { readSnapshot: exec.arguments.file_path === snapshotPath, readOriginal: exec.arguments.file_path === source, readWindow } : {}) })
       return decision
     }, { prepend: true })
-    ctx.tools.register(defineContentToolFixture({ name: 'fixture', description: 'Return immutable evaluation dataset.', parameters: {}, execute: async () => [{ type: 'text', text: fixture.text }] }))
+    ctx.tools.register(defineContentToolFixture({ name: 'fixture', description: 'Return immutable evaluation dataset.', parameters: {}, execute: async () => [{ type: 'text', text: fixtureContent }] }))
     if (replay) ctx.llm.registerAdapter(['replay'], adapterFactory ? adapterFactory({ LlmAdapter, fixture, source, snapshotPath: () => snapshotPath, delivered: () => delivered, phase: () => phaseIndex }) : new ReplayAdapter(fixture, source, () => snapshotPath, () => delivered))
     else await ctx.plugin(Provider, { apiKeyEnv: 'DEEPSEEK_API_KEY', thinking: 'disabled', reasoningEffort: 'off', maxTokens: 1024, streamIdleTimeoutMs: 30000 })
     await configureContext?.(ctx)
@@ -200,7 +202,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     timer = setTimeout(() => { stoppedReason = 'timeout'; agent.cancel({ kind: 'hook', reason: 'evaluation-timeout' }) }, timeoutMs)
     for (const [index, phase] of (fixture.phases ?? [{ query: fixture.query, expected: fixture.expected }]).entries()) {
       phaseIndex = index
-      let prompt = `${phase.query}\nOriginal fixture path: ${source}`
+      let prompt = fixture.discoverSourcePath ? `${phase.query}\nCall fixture to discover the original source locator before reading it.` : `${phase.query}\nOriginal fixture path: ${source}`
       for (let correction = 0; correction <= validationFeedbackLimit; correction++) {
         const eventBoundary = agent.session.snapshotEvents().length
         agent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }))
