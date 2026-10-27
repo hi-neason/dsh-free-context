@@ -117,7 +117,7 @@ export function apply(ctx, input) {
         ...(selection.coverage ? [`Compiler header coverage (supported grammar only, not semantic completeness): ${JSON.stringify(selection.coverage)} Counts describe the validated selection BEFORE downstream retention, NOT final inline coverage. A downstream preview may omit selected excerpts; recover the full spilled tool output for omitted excerpts, or the original snapshot for source-completeness checks.`] : []),
         'The retained excerpts quote the source verbatim. Answer from them when sufficient; recover the original for missing evidence, completeness checks, or requested verification.',
         formatSnapshotReference(originalReceipt),
-        'Auxiliary selection audit manifest (full request, response and usage):', formatSnapshotReference(manifestReceipt)].join('\n\n')
+        'Auxiliary selection audit manifest (full request, response and usage):', formatSnapshotReference(manifestReceipt, { includeGuidance: false })].join('\n\n')
       const replacement = [{ ...content[0], text }]
       const output = measureContent(replacement)
       if (exec.signal?.aborted) { reason = 'aborted'; return undefined }

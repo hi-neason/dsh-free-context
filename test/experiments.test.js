@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import * as plugin from 'dsh-free-context/experiments'
+import { formatSnapshotReference } from '../src/snapshot.js'
 import { parseExperimentConfig } from '../src/experiment-config.js'
 
 const text = Array.from({ length: 40 }, (_, i) => `Paragraph ${i} explains general background in ordinary prose. ${'This sentence provides further descriptive context. '.repeat(10)}`).join('\n\n')
@@ -454,4 +455,27 @@ test('generic diagnostics never render compiler coverage', async () => {
   assert.ok(output.content)
   assert.equal(output.content[0].text.includes('Compiler header coverage'), false)
   assert.equal(JSON.parse(f.saves[1].content).coverage, undefined)
+})
+
+test('only audit reference omits duplicate prose while both receipts and recovery IDs remain intact', async () => {
+  const f = setup()
+  const output = await f.handler(execution(), result(), async () => ({ kind: 'accept' }))
+  const text = output.content[0].text
+  const refs = text.split('\n').filter(line => line.startsWith('Original tool-result snapshot: ')).map(line => JSON.parse(line.slice('Original tool-result snapshot: '.length)))
+  assert.equal(refs.length, 2)
+  for (const [index, receipt] of refs.entries()) {
+    assert.equal(receipt.sessionId, 'session-1')
+    assert.equal(receipt.callId, 'call-1')
+    assert.equal(receipt.toolName, 'read')
+    assert.equal(receipt.locator, `spill://fixture/${index + 1}`)
+    assert.equal(receipt.bytes, Buffer.byteLength(f.saves[index].content))
+    assert.equal(receipt.retrievalHint, 'Use exact snapshot.')
+  }
+  assert.ok(text.includes(formatSnapshotReference(refs[0])))
+  assert.ok(text.endsWith(formatSnapshotReference(refs[1], { includeGuidance: false })))
+  assert.equal(text.split('For full recovery, verify').length - 1, 1)
+  const compact = formatSnapshotReference(refs[1], { includeGuidance: false })
+  const full = formatSnapshotReference(refs[1])
+  assert.ok(Buffer.byteLength(full) - Buffer.byteLength(compact) > 400)
+  assert.equal(JSON.parse(f.saves[1].content).originalReceipt.sha256, refs[0].sha256)
 })

@@ -71,10 +71,16 @@ export function snapshotReferenceId(receipt) {
 }
 
 /** Render an opaque backend reference; never derive a filesystem path from it. */
-export function formatSnapshotReference(receipt) {
-  return [
+export function formatSnapshotReference(receipt, { includeGuidance = true } = {}) {
+  if (typeof includeGuidance !== 'boolean') throw new TypeError('includeGuidance must be a boolean')
+  const reference = [
     `Original tool-result snapshot: ${JSON.stringify(receipt)}`,
-    `Snapshot referenceId: ${snapshotReferenceId(receipt)}. For verified recovery, use this registered ID with free_context_recall if installed.`,
+    `Snapshot referenceId: ${snapshotReferenceId(receipt)}.`,
+  ]
+  if (!includeGuidance) return reference.join('\n')
+  return [
+    reference[0],
+    `${reference[1]} For verified recovery, use this registered ID with free_context_recall if installed.`,
     'Retrieve this snapshot when the task requires omitted evidence, a completeness check, or the exact original. Use the backend retrievalHint and existing read/grep tools when supported; read all pages for full recovery. Do not substitute the current source file.',
     'For full recovery, verify the UTF-8 byte count and SHA-256 of the complete retrieved text against this receipt. A partial read or grep match does not verify the full snapshot.',
   ].join('\n')

@@ -128,3 +128,21 @@ test('storage deadlines and pending-save limits bound uncooperative backend work
   releases[1].resolve({ locator: 'ok', retrievalHint: 'read', bytes: 1 })
   assert.equal((await next).locator, 'ok')
 })
+
+test('compact reference omits only guidance and retains exact receipt plus stable ID', async () => {
+  const receipt = await archiveOriginal(backend(), execution(), '中文😀 original')
+  const referenceId = createHash('sha256').update(JSON.stringify([receipt.locator, receipt.sha256])).digest('hex')
+  const expected = [
+    `Original tool-result snapshot: ${JSON.stringify(receipt)}`,
+    `Snapshot referenceId: ${referenceId}. For verified recovery, use this registered ID with free_context_recall if installed.`,
+    'Retrieve this snapshot when the task requires omitted evidence, a completeness check, or the exact original. Use the backend retrievalHint and existing read/grep tools when supported; read all pages for full recovery. Do not substitute the current source file.',
+    'For full recovery, verify the UTF-8 byte count and SHA-256 of the complete retrieved text against this receipt. A partial read or grep match does not verify the full snapshot.',
+  ].join('\n')
+  assert.equal(formatSnapshotReference(receipt), expected)
+  assert.equal(formatSnapshotReference(receipt, { includeGuidance: true }), expected)
+  const compact = formatSnapshotReference(receipt, { includeGuidance: false })
+  assert.equal(compact, `Original tool-result snapshot: ${JSON.stringify(receipt)}\nSnapshot referenceId: ${referenceId}.`)
+  assert.deepEqual(JSON.parse(compact.split('\n')[0].slice('Original tool-result snapshot: '.length)), receipt)
+  assert.ok(Buffer.byteLength(compact) < Buffer.byteLength(expected))
+  for (const value of [0, 1, null, 'false', [], {}]) assert.throws(() => formatSnapshotReference(receipt, { includeGuidance: value }), TypeError)
+})
