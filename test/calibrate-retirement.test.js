@@ -15,7 +15,7 @@ export function reports() {
       usage: { inputTokens: 100 * remaining, outputTokens: 10 * remaining, cacheReadTokens: 0, cacheWriteTokens: 0 }, modelCalls }
     return { evaluationKind: 'history-retirement-live-agent', completed: true, runId: `run-${index}`, model: 'flash', fixture, fixtureHash: retirementEvidenceHash(fixture), assumptions, policyHash: retirementEvidenceHash(assumptions),
       provenance: { model: 'flash', runtimeVersion: '0.2.1-rc.2', repositoryCommit: 'a'.repeat(40), sourceTreeHash: 'b'.repeat(64), cacheCondition: 'shared-provider-cache-uncontrolled-counterbalanced' },
-      tasks: ['baseline-default', 'baseline-tuned', 'plugin'].map(group => structuredClone({ ...task, group })) }
+      tasks: ['baseline-default', 'baseline-tuned', 'plugin'].map(group => structuredClone({ ...task, group, configuration: { maxInlineTokens: group === 'baseline-tuned' ? 1200 : 12500, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: false, validationFeedbackLimit: 2 } })) }
   })
 }
 test('complete comparable real-run reports generate conservative observed configuration', () => {
@@ -57,6 +57,19 @@ test('replay, wrong scope, duplicate run, failed quality and missing recovery ac
     r => { r[0] = null }, r => { r[0].tasks[2].retirements = undefined }, r => { r[0].model = 'other' }, r => { r[0] = structuredClone(r[1]) },
     r => { r[0].tasks[2].modelCalls[0].complete = false }, r => { r[0].tasks[2].toolCalls = [] },
     r => { for (const call of r[0].tasks[2].modelCalls) call.visibleToolResults = [] }, r => { r[0].tasks[2].passed = false }]) {
+    const data = reports(); mutate(data)
+    assert.equal(calibrateRetirementReports(data).status, 'declined')
+  }
+})
+
+test('configuration changes and missing runner identity cannot share a forecast scope', () => {
+  for (const mutate of [
+    r => { delete r[0].tasks[2].configuration },
+    r => { r[0].tasks[2].configuration.maxInlineTokens = 1200 },
+    r => { r[0].tasks[2].configuration.nativePolicyInstalledAfterPlugin = true },
+    r => { r[0].tasks[2].configuration.validationFeedbackLimit = 0 },
+    r => { r[0].tasks[2].configuration.maxSteps = 12; r[0].tasks[2].configuration.timeoutMs = 120000 },
+  ]) {
     const data = reports(); mutate(data)
     assert.equal(calibrateRetirementReports(data).status, 'declined')
   }

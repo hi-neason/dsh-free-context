@@ -247,7 +247,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       ...(historyRetirement ? { historyRetirement, retirements: retirements.map(record => ({ ...record,
         ...(record.reason === 'retired' ? { actualPostRetirementSteps: steps - record.beforeStep + 1 } : {}) })) } : {}),
       decisions: decisions.map(({ strategy, outcome, reason, input, output }) => ({ strategy, outcome, reason, input, output })),
-      configuration: { maxInlineTokens, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: composeWithTunedNative, validationFeedbackLimit },
+      configuration: { maxInlineTokens, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: composeWithTunedNative, validationFeedbackLimit, maxSteps, timeoutMs },
       turnEnds: events.filter(event => event.type === 'turn/end').map(event => ({ kind: event.data.reason.kind, code: event.data.reason.error?.code })),
     }
   } catch (error) {

@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import { assessNetBenefit } from '../src/economics.js'
 import { summarizeAcceptanceV2 } from './acceptance-benchmark-v2.js'
-import { calibrateRetirementReports, inspectRetirementReport, retirementEvidenceHash } from './calibrate-retirement.js'
+import { calibrateRetirementReports, inspectRetirementReport, retirementEvidenceHash, runnerConfigurationScope } from './calibrate-retirement.js'
 import { priceUsage } from './evaluation-accounting.js'
 
 /** Pin the existing historical report's digest before running this backtest.
@@ -62,7 +62,8 @@ export function originalAcceptance(report, calibrationEvidence, negativeBacktest
   const membershipComplete = Array.isArray(expectedRunIds) && expectedRunIds.length >= 3 && expectedRunIds.length <= 64 &&
     expectedRunIds.every(id => typeof id === 'string' && id.trim()) && new Set(expectedRunIds).size === expectedRunIds.length &&
     Array.isArray(reports) && isDeepStrictEqual(reports.map(item => item?.runId).sort(), [...expectedRunIds].sort())
-  const comparableEnvironment = membershipComplete && reports.every(item => item && isDeepStrictEqual(item.provenance, report?.provenance) && item.model === report?.pricing?.model && Array.isArray(item.tasks) && item.tasks.every(task => isDeepStrictEqual(task?.pricing, report.pricing)))
+  const benchmarkRunner = runnerConfigurationScope(report?.results)
+  const comparableEnvironment = benchmarkRunner && membershipComplete && reports.every(item => item && isDeepStrictEqual(item.provenance, report?.provenance) && item.model === report?.pricing?.model && Array.isArray(item.tasks) && item.tasks.every(task => isDeepStrictEqual(task?.pricing, report.pricing)) && isDeepStrictEqual(runnerConfigurationScope(item.tasks), benchmarkRunner))
   const calibration = comparableEnvironment ? calibrateRetirementReports(reports) : { status: 'declined', reason: membershipComplete ? 'incomparable-benchmark-environment' : 'incomplete-frozen-membership' }
   const overlapsCalibration = Array.isArray(reports) && reports.some(item =>
     item?.runId === negativeBacktest?.report?.runId || retirementEvidenceHash(item) === negativeBacktest?.expectedReportHash)

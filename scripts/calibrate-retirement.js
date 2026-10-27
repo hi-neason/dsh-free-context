@@ -10,6 +10,26 @@ export const retirementEvidenceHash = value => createHash('sha256').update(JSON.
 const decline = reason => ({ status: 'declined', reason })
 const groups = ['baseline-default', 'baseline-tuned', 'plugin']
 
+/** Bind the actual comparison policies, including any recorded execution limits. */
+export function runnerConfigurationScope(tasks) {
+  if (!Array.isArray(tasks)) return undefined
+  const scope = []
+  const keys = ['maxInlineTokens', 'plugin', 'nativePolicyInstalledAfterPlugin', 'validationFeedbackLimit', 'maxSteps', 'timeoutMs']
+  for (const group of groups) {
+    const records = tasks.filter(task => task?.group === group)
+    const config = records[0]?.configuration
+    if (!config || typeof config !== 'object' || Array.isArray(config) || ![Object.prototype, null].includes(Object.getPrototypeOf(config)) ||
+        Reflect.ownKeys(config).some(key => !keys.includes(key)) || !keys.slice(0, 4).every(key => Object.hasOwn(config, key)) ||
+        !Number.isSafeInteger(config.maxInlineTokens) || config.maxInlineTokens < 0 || config.plugin !== (group === 'plugin') ||
+        typeof config.nativePolicyInstalledAfterPlugin !== 'boolean' ||
+        !Number.isSafeInteger(config.validationFeedbackLimit) || config.validationFeedbackLimit < 0 || config.validationFeedbackLimit > 2 ||
+        ['maxSteps', 'timeoutMs'].some(key => config[key] !== undefined && (!Number.isSafeInteger(config[key]) || config[key] < 1)) ||
+        records.some(task => !isDeepStrictEqual(task.configuration, config))) return undefined
+    scope.push({ group, configuration: structuredClone(config) })
+  }
+  return scope
+}
+
 /** Validate raw runner evidence, deriving horizon and costs rather than trusting labels. */
 export function inspectRetirementReport(report) {
   if (!report || report.evaluationKind !== 'history-retirement-live-agent' || report.completed !== true ||
@@ -23,6 +43,8 @@ export function inspectRetirementReport(report) {
       typeof report.provenance?.cacheCondition !== 'string') return decline('incomplete-identity')
   if (!Array.isArray(report.tasks) || report.tasks.length !== 3 ||
       JSON.stringify(report.tasks.map(task => task?.group).sort()) !== JSON.stringify(groups)) return decline('incomplete-real-run')
+  const runnerConfigurations = runnerConfigurationScope(report.tasks)
+  if (!runnerConfigurations) return decline('incomplete-runner-configuration')
   const phases = report.fixture.phases ?? [{ expected: report.fixture.expected }]
   if (!phases.length || phases.some(phase => phase.expected === undefined)) return decline('missing-quality-contract')
   for (const task of report.tasks) {
@@ -61,7 +83,7 @@ export function inspectRetirementReport(report) {
   const recovered = task.modelCalls.filter(call => call.visibleToolResults.some(result => reads.has(result.callId)))
   if (!recovered.length) return decline('incomplete-recovery-accounting')
   const recoveryCost = recovered.reduce((sum, call) => sum + priceUsage(call.usage, task.pricing), 0)
-  const scope = `retirement:${retirementEvidenceHash({ fixtureHash: report.fixtureHash, policyHash: report.policyHash, provenance: report.provenance, pricing: task.pricing })}`
+  const scope = `retirement:${retirementEvidenceHash({ fixtureHash: report.fixtureHash, policyHash: report.policyHash, provenance: report.provenance, pricing: task.pricing, runnerConfigurations })}`
   return { status: 'validated', scope, observation: { runId: report.runId, scope, usageKind: 'provider-reported', usageComplete: true, qualityPassed: true, remainingRequests: Math.min(...horizons), recoveryCost } }
 }
 

@@ -17,7 +17,7 @@ function benchmark() {
       phaseResults: (task.phases ?? [task]).map(phase => ({ actual: phase.expected, passed: true, freshAnswer: true, turnCompleted: true })), turnEnds: [{ kind: 'completed' }],
       replay: false, usageKind: 'provider-reported', usageComplete: true, usage: tokens,
       modelCalls: [{ complete: true, provider: 'deepseek-official', model: 'model', usage: tokens }],
-      configuration: { maxInlineTokens: run.group === 'baseline-default' ? 12500 : 1200, nativePolicyInstalledAfterPlugin: true, validationFeedbackLimit: 2 },
+      configuration: { maxInlineTokens: run.group === 'baseline-default' ? 12500 : 1200, plugin: run.group === 'plugin', nativePolicyInstalledAfterPlugin: true, validationFeedbackLimit: 2 },
       retirements: [{ reason: task.expectedRetirement ? 'retired' : 'economic-gate', economics: { adopt: false } }],
       toolCalls: [0, 1].map(phase => ({ name: 'read', phase, readSnapshot: true, isError: false })),
       adoptions: [{ callId: 'fixture-call', strategy: task.experiment === 'diagnostic-evidence' ? 'diagnostic-evidence-selection-v1' : `${task.experiment}-prose-selection-v1`, persisted: true, modelVisible: true, contentHash: 'c'.repeat(64), persistedContentHash: 'c'.repeat(64), modelVisibleContentHash: 'c'.repeat(64) }],
@@ -30,7 +30,7 @@ function evidence() {
   const assumptions = { minimumFutureRequests: 200 }
   const reports = [0, 1, 2].map(index => ({ evaluationKind: 'history-retirement-live-agent', completed: true, runId: `run-${index}`, model: 'model', provenance,
     fixture, fixtureHash: retirementEvidenceHash(fixture), assumptions, policyHash: retirementEvidenceHash(assumptions), tasks: ['baseline-default', 'baseline-tuned', 'plugin'].map(group => ({
-      group, task: fixture.id, startedAt: `run-${index}`, steps: 2, replay: false, passed: true, usageKind: 'provider-reported', usageComplete: true, attempts: 0, pricing, historyRetirement: assumptions,
+      group, configuration: { maxInlineTokens: group === 'baseline-default' ? 12500 : 1200, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: true, validationFeedbackLimit: 2 }, task: fixture.id, startedAt: `run-${index}`, steps: 2, replay: false, passed: true, usageKind: 'provider-reported', usageComplete: true, attempts: 0, pricing, historyRetirement: assumptions,
       phaseResults: [{ actual: fixture.expected, passed: true, freshAnswer: true, turnCompleted: true }], turnEnds: [{ kind: 'completed' }],
       retirements: [{ reason: 'retired', beforeStep: 1, actualPostRetirementSteps: 2, economics: { minimumFutureRequests: 200, adopt: true, removedTokens: 1000, compressionCost: 0, expectedRecoveryCost: 0, cacheRebuildCost: .0001, safetyMargin: .25 } }],
       toolCalls: [{ name: 'fixture', isError: false }, { callId: 'read-1', phase: 0, name: 'read', readSnapshot: true, isError: false }],
@@ -104,4 +104,13 @@ test('held-out backtest cannot also train its calibrated forecast', () => {
   assert.equal(result.accepted, false)
   assert.equal(result.shortHorizonBacktestPassed, false)
   assert.equal(result.backtest.reason, 'backtest-overlaps-calibration')
+})
+
+test('a self-consistent calibration from a different runner configuration cannot certify a benchmark', () => {
+  const data = evidence()
+  for (const report of data.calibration.reports) for (const task of report.tasks) task.configuration.validationFeedbackLimit = 0
+  assert.equal(calibrateRetirementReports(data.calibration.reports).status, 'calibrated')
+  const result = originalAcceptance(benchmark(), data.calibration, data.backtest)
+  assert.equal(result.calibrationEvidenceComplete, false)
+  assert.equal(result.accepted, false)
 })
