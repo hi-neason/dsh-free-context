@@ -1,3 +1,4 @@
+import { containsPlaceholder } from './evaluation-contract.js'
 import { safeFailure } from './evaluation-accounting.js'
 import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
@@ -60,7 +61,7 @@ export function summarizePlannedAcceptance(canonical, plan, results, { replay = 
     const phases = fixture.phases ?? [{ expected: fixture.expected }]
     const fixtureEachPhase = !fixture.requireFixtureEachPhase || phases.every((_, phase) => result.toolCalls?.some(call => call.phase === phase && call.name === (fixture.ptc ? 'run_code' : 'fixture') && call.isError === false))
     const recoveredEachPhase = !fixture.requireSnapshot || result.group !== 'plugin' || fixture.historyRetirement && !result.retirements?.some(record => record.reason === 'retired') || phases.every((_, phase) => result.toolCalls?.some(call => call.phase === phase && call.name === 'read' && call.readSnapshot === true && call.isError === false))
-    return fixtureEachPhase && recoveredEachPhase && !result.turnEnds?.some(turn => turn.kind !== 'completed') && result.phaseResults?.length === phases.length && result.phaseResults.every((phase, index) => phase.passed === true && phase.freshAnswer === true && phase.turnCompleted === true && isDeepStrictEqual(phase.actual, phases[index].expected)) && result.passed === true && result.exactFacts === true && result.requiredTools === true && result.fileCorrect === true && result.snapshotRecovered === true
+    return (!fixture.rejectPlaceholderValues || result.responseContractSatisfied === true && result.phaseResults?.every(phase => !containsPlaceholder(phase.actual))) && fixtureEachPhase && recoveredEachPhase && !result.turnEnds?.some(turn => turn.kind !== 'completed') && result.phaseResults?.length === phases.length && result.phaseResults.every((phase, index) => phase.passed === true && phase.freshAnswer === true && phase.turnCompleted === true && isDeepStrictEqual(phase.actual, phases[index].expected)) && result.passed === true && result.exactFacts === true && result.requiredTools === true && result.fileCorrect === true && result.snapshotRecovered === true
   })
   const usageComplete = coverageComplete && results.every(result => result.usageComplete === true && Array.isArray(result.modelCalls) && result.modelCalls.length > 0 && result.modelCalls.every(call => call.complete && call.usage && fields.every((field, index) => index > 1 && call.usage[field] === undefined || Number.isSafeInteger(call.usage[field]) && call.usage[field] >= 0)) && fields.every(field => {
     const sum = result.modelCalls.reduce((total, call) => total + (call.usage?.[field] ?? 0), 0)

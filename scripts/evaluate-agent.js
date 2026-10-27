@@ -1,3 +1,4 @@
+import { containsPlaceholder } from './evaluation-contract.js'
 import { validUsage, summarizeUsage, priceUsage, safeFailure } from './evaluation-accounting.js'
 export { summarizeUsage, priceUsage } from './evaluation-accounting.js'
 import { createHash } from 'node:crypto'
@@ -94,6 +95,7 @@ export function collectAdoptions(events, modelCalls) {
 
 export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs, experimentalConfig, adapterFactory, maxSteps = criteria.maxSteps, configureContext, composeWithTunedNative = false, validationFeedbackLimit = 0 } = {}) {
   if (!Number.isSafeInteger(validationFeedbackLimit) || validationFeedbackLimit < 0 || validationFeedbackLimit > 2) throw new TypeError('Validation feedback limit must be 0..2')
+  if (fixture.rejectPlaceholderValues !== undefined && typeof fixture.rejectPlaceholderValues !== 'boolean') throw new TypeError('Placeholder response contract must be boolean')
   if (!groups.includes(group)) throw new TypeError('Unknown evaluation group')
   if (!replay && !key) throw new TypeError('Missing explicit credential')
   const directory = await mkdtemp(join(tmpdir(), 'dsh-agent-eval-'))
@@ -213,6 +215,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
         const issues = []
         if (!turnCompleted || !phaseMessages.length) issues.push('This phase did not produce a fresh answer in a completed turn.')
         if (!parsed) issues.push('Return the requested JSON object only, without prose or Markdown.')
+        if (parsed && fixture.rejectPlaceholderValues && containsPlaceholder(actual)) issues.push('The response contains placeholder values instead of the requested source facts. Inspect available original evidence and return supported literal values, without placeholders.')
         if (!toolCalls.some(call => call.name === (fixture.ptc ? 'run_code' : 'fixture') && !call.isError && (!fixture.requireFixtureEachPhase || call.phase === index))) issues.push('Use the required fixture tool in this phase before answering.')
         if (fixture.requireReadEachPhase && !toolCalls.some(call => call.phase === index && call.name === 'read' && !call.isError)) issues.push('Read the required source in this phase before answering.')
         const needsSnapshot = group === 'plugin' && (fixture.kind === 'tap' || fixture.requireSnapshot) && (!historyRetirement || retirements.some(record => record.reason === 'retired'))
@@ -245,10 +248,11 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     const snapshotRecoveryByPhase = phaseResults.map((_, phase) => ({ phase, recovered: toolCalls.some(call => call.phase === phase && call.readSnapshot && !call.isError) }))
     const snapshotRecovered = !snapshotRecoveryRequired || (fixture.requireSnapshot ? snapshotRecoveryByPhase.every(phase => phase.recovered) : toolCalls.some(call => call.readSnapshot && !call.isError))
     const failedTurn = events.some(event => event.type === 'turn/end' && event.data.reason.kind !== 'completed')
-    const passed = exactFacts && requiredTools && snapshotRecovered && !failedTurn && !stoppedReason && attempts.length === 0 && steps <= maxSteps
+    const responseContractSatisfied = !fixture.rejectPlaceholderValues || phaseResults.every(phase => !containsPlaceholder(phase.actual))
+    const passed = responseContractSatisfied && exactFacts && requiredTools && snapshotRecovered && !failedTurn && !stoppedReason && attempts.length === 0 && steps <= maxSteps
     const fileCorrect = !fixture.edit || await readFile(source, 'utf8') === fixture.editedText
     return { task: fixture.id, group, replay, passed: passed && fileCorrect, fileCorrect, exactFacts, requiredTools, snapshotRecoveryRequired, snapshotRecovered, actual, finalAnswer: text ?? null, startedAt, steps,
-      drafts, feedback, correctionCount: feedback.length, attempts: attempts.length, usageComplete, modelCalls, phaseResults, experiments, snapshotRecoveryByPhase,
+      drafts, feedback, correctionCount: feedback.length, responseContractSatisfied, attempts: attempts.length, usageComplete, modelCalls, phaseResults, experiments, snapshotRecoveryByPhase,
       adoptions: collectAdoptions(events, modelCalls),
       recoveryCalls: toolCalls.filter(call => call.readSnapshot).length,
       usageKind: replay ? 'synthetic-replay' : 'provider-reported', usage,

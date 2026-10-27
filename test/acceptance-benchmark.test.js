@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { acceptanceFixtures } from './fixtures/acceptance/tasks.js'
-import { acceptanceCriteria, createAcceptancePlan, summarizeAcceptance, evaluateAcceptance } from '../scripts/acceptance-benchmark.js'
+import { acceptanceCriteria, createAcceptancePlan, summarizeAcceptance, evaluateAcceptance, summarizePlannedAcceptance } from '../scripts/acceptance-benchmark.js'
 
 test('predeclared diverse manifest is deterministic and balances every task/group position', () => {
   const plan = createAcceptancePlan()
@@ -107,4 +107,23 @@ test('failed turns and missing fresh phase evidence cannot pass forged summary f
     const data = records(plan); mutate(data)
     assert.equal(summarizeAcceptance(plan, data, { pricing, provenance }).qualityComplete, false)
   }
+})
+
+test('an opt-in response contract needs its own completion evidence', () => {
+  const plan = createAcceptancePlan()
+  plan.tasks = plan.tasks.map(task => ({ ...task, rejectPlaceholderValues: task.id === 'json-repeated' }))
+  const data = records(plan)
+  assert.equal(summarizePlannedAcceptance(plan, plan, data, { pricing, provenance }).qualityComplete, false)
+  for (const row of data) row.responseContractSatisfied = true
+  assert.equal(summarizePlannedAcceptance(plan, plan, data, { pricing, provenance }).qualityComplete, true)
+  data.find(row => row.task === 'json-repeated').responseContractSatisfied = false
+  assert.equal(summarizePlannedAcceptance(plan, plan, data, { pricing, provenance }).qualityComplete, false)
+})
+
+test('a forged contract flag cannot certify source-null values under an explicit non-placeholder contract', () => {
+  const plan = createAcceptancePlan()
+  plan.tasks = plan.tasks.map(task => ({ ...task, rejectPlaceholderValues: task.id === 'json-nested-precision' }))
+  const data = records(plan)
+  for (const row of data) row.responseContractSatisfied = true
+  assert.equal(summarizePlannedAcceptance(plan, plan, data, { pricing, provenance }).qualityComplete, false)
 })

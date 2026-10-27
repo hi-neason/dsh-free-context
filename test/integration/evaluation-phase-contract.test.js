@@ -60,3 +60,46 @@ test('read trace records numeric windows without leaking paths or claiming byte 
     assert.equal(JSON.stringify(read.readWindow).includes('job-40'), false)
   }
 })
+
+test('opt-in placeholder feedback is bounded, source-independent and charged for every group', async () => {
+  const fixture = { ...acceptanceFixtures()[0], rejectPlaceholderValues: true }
+  for (const group of ['baseline-default', 'baseline-tuned', 'plugin']) {
+    const adapterFactory = options => {
+      const adapter = acceptanceReplayAdapter(options)
+      const stream = adapter.stream.bind(adapter)
+      let replaced = false
+      adapter.stream = async function* (request) {
+        for await (const chunk of stream(request)) {
+          if (!replaced && chunk.type === 'block-end' && chunk.block.type === 'text') {
+            replaced = true
+            yield { ...chunk, block: { type: 'text', text: '{"processing_status":"Not available in source","retry_count":null}' } }
+          } else yield chunk
+        }
+      }
+      return adapter
+    }
+    const result = await runAgentFixture(fixture, group, { replay: true, adapterFactory, validationFeedbackLimit: 2 })
+    assert.equal(result.passed, true)
+    assert.equal(result.correctionCount, 1)
+    assert.equal(result.modelCalls.length, 4)
+    assert.equal(result.drafts[0].exactFacts, false)
+    assert.match(JSON.stringify(result.feedback), /placeholder/)
+    assert.equal(JSON.stringify(result.feedback).includes('blocked'), false)
+    assert.equal(JSON.stringify(result.feedback).includes('retry_count'), false)
+  }
+})
+
+test('literal unknown/null source values remain valid unless the response contract is explicitly enabled', async () => {
+  const fixture = acceptanceFixtures()[0]
+  fixture.text = JSON.stringify([{ record_identifier: 'job-40', processing_status: 'unknown', retry_count: null }])
+  fixture.expected = { processing_status: 'unknown', retry_count: null }
+  fixture.query = 'Call fixture and return its processing_status and retry_count exactly as JSON.'
+  const compatible = await runAgentFixture(fixture, 'baseline-default', { replay: true, adapterFactory: acceptanceReplayAdapter })
+  assert.equal(compatible.passed, true)
+  assert.equal(compatible.responseContractSatisfied, true)
+  const required = await runAgentFixture({ ...fixture, rejectPlaceholderValues: true }, 'baseline-default', { replay: true, adapterFactory: acceptanceReplayAdapter, validationFeedbackLimit: 2 })
+  assert.equal(required.passed, false)
+  assert.equal(required.responseContractSatisfied, false)
+  assert.equal(required.correctionCount, 2)
+  assert.equal(required.modelCalls.length, 5)
+})
