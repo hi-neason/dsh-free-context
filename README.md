@@ -622,3 +622,16 @@ const checked = summarizeDiagnosticTrial(replay.plan, replay.results)
 查询选段有一次选择了普通背景段落，最终通过原文回读或已有历史完成正确答案；通过的是完整任务及恢复流程，不能据此声称每次选择都覆盖所需事实。
 
 三类实验因此各有一个通过预设质量、实际采用、累计收益与配对中位数门槛的**受控合成任务场景**。金额按 provider usage 与统一声明价格估算，非发票；缓存不受控、每模式仅三次重复，实验使用显式 `measured-trial`，不代表默认经济准入策略会采用或获利。全部十四项仍未通过同版本完整组合验收，真实开发任务泛化也未验证。
+
+### v3 完整验收入口
+
+`--version 3` 保留 13 项任务和 117 次运行，逐个要求三项模型实验的质量、实际采用、累计收益与配对收益中位数通过；不会用一个模式的收益抵消另一个模式的失败。v1/v2 的清单和旧结论保持原样。
+
+```sh
+DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:acceptance -- --version 3 \
+  --output /private/path/replay-v3.json
+```
+
+真实运行沿用 `--live --credential-file ... --pricing-file ...`。CLI 在首次模型调用前以独占创建方式写入 `<output>.plan.json`，随后逐条保存 `<output>.jsonl`；已有文件会拒绝覆盖。直接调用 `evaluateAcceptanceV3()` 时，真实模式必须提供异步 `onPlan` 和 `onResult` 持久化回调。计划、价格、来源标识及结果使用独立冻结副本；每项任务结束后独立核对全部原始模型调用用量、provider/model 和价格，记录不完整就停止后续付费任务。
+
+`fullAccepted` 表示这份固定基准通过。原始十四项的联合验收还须调用 `originalAcceptanceV3()`，核验同源码、同运行配置的预先登记校准训练记录，以及独立的短期负样本回测。生产插件的模型实验仍默认关闭；v3 显式使用 `measured-trial` 收集真实成本，不能据此宣称默认经济准入策略获利。
