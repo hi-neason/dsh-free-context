@@ -105,7 +105,7 @@ export function apply(ctx, input) {
       if (estimatedCost > config.maxCallCost) { reason = 'actual-call-cost-budget'; return undefined }
       reason = 'manifest-failed'
       const manifest = JSON.stringify({ version: 1, admission: config.admission, ...(trial ? { predictedSavings: null, trialBudget: trialBudget.snapshot() } : {}), policy: selection.strategy, sourceHash: selection.sourceHash, queryHash: selection.queryHash,
-        originalReceipt, selectedSpans: selection.spans.map(({ id, start, end, startLine, endLine, guards }) => ({ id, start, end, startLine, endLine, guards })),
+        originalReceipt, ...(selection.coverage ? { coverage: selection.coverage } : {}), selectedSpans: selection.spans.map(({ id, start, end, startLine, endLine, guards }) => ({ id, start, end, startLine, endLine, guards })),
         budgets: { maxQueryBytes: config.maxQueryBytes, maxInputBytes: config.maxInputBytes, maxPromptBytes: config.maxPromptBytes, maxOutputBytes: config.maxOutputBytes, maxOutputTokens: config.maxOutputTokens, timeoutMs: config.timeoutMs },
         audit: selection.audit, cacheHit: selection.cacheHit, shared: selection.shared, callUsage: selection.callUsage,
         originUsage: selection.originUsage, currency: pricing.currency, estimatedCost,
@@ -114,6 +114,7 @@ export function apply(ctx, input) {
       const auditReference = tracking.record(exec, manifestReceipt, 'audit')
       const text = [`[LOSSY ${config.selectionMode === 'diagnostic-evidence' ? 'diagnostic evidence' : 'paragraph'} selection; policy ${selection.strategy}. Extracted source spans do not prove complete evidence.]`,
         selection.text,
+        ...(selection.coverage ? [`Compiler header coverage (supported grammar only, not semantic completeness): ${JSON.stringify(selection.coverage)} Counts describe the validated selection BEFORE downstream retention, NOT final inline coverage. A downstream preview may omit selected excerpts; recover the full spilled tool output for omitted excerpts, or the original snapshot for source-completeness checks.`] : []),
         'The retained excerpts quote the source verbatim. Answer from them when sufficient; recover the original for missing evidence, completeness checks, or requested verification.',
         formatSnapshotReference(originalReceipt),
         'Auxiliary selection audit manifest (full request, response and usage):', formatSnapshotReference(manifestReceipt)].join('\n\n')

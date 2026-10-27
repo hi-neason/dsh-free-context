@@ -245,6 +245,7 @@ export function createTextSelector(options) {
         finishReason: 'stop', usage,
       })
       const result = Object.freeze({ status: 'selected', strategy, sourceHash, queryHash, audit,
+        ...(validated?.coverage ? { coverage: validated.coverage } : {}),
         selectedIds: Object.freeze(selected.map(span => span.id)), spans: selected,
         text: validated?.text ?? selected.map(span => `[Source paragraph ${span.id}; UTF-16 ${span.start}:${span.end}]\n${span.text}`).join('\n\n'), originUsage: usage, callUsage: usage, usageComplete: usage !== undefined,
         cacheHit: false, llmCalled: true })

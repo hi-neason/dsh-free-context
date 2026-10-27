@@ -8,6 +8,22 @@ const diagnosticStart = /^(?:(?:ERROR|WARN(?:ING)?|FATAL|EXCEPTION)\b|.+(?:\(\d+
 const informationalStart = /^(?:(?:INFO|DEBUG|TRACE)(?::|\s)|\[(?:info|debug|trace)\])/i
 const embeddedStatus = /\b(?:exit(?:ed)?(?:\s+with)?(?:\s+(?:code|status))?\s*[:=]?\s*-?\d+|(?:status|result|errors?|warnings?|failures?)\s*[:=])/i
 
+// Deliberately narrow, line-anchored location grammar: both line and column
+// are required. Occurrences count individually, including within INFO blocks.
+const compilerHeader = /^[ \t]*(?:[A-Za-z]:[\\/])?[^:\r\n()]+(?:\(\d+,\d+\)|:\d+:\d+):[ \t]+(?:error|warning|note|fatal error)(?:[ \t]+[A-Z][A-Z0-9_-]*)?:[^\r\n]*/gm
+
+function selectionCoverage(text, verified, selected) {
+  const headers = [...text.matchAll(compilerHeader)]
+  if (!headers.length) return undefined
+  const statusBlocks = verified.spans.filter(span => span.text.split(/\r?\n/).some(line => statusLine.test(line.trim())))
+  const contains = (start, end) => selected.some(span => span.start <= start && span.end >= end)
+  const scanned = Object.freeze({ compilerHeaders: headers.length, statusBlocks: statusBlocks.length })
+  const retained = Object.freeze({ compilerHeaders: headers.filter(match => contains(match.index, match.index + match[0].length)).length,
+    statusBlocks: statusBlocks.filter(span => contains(span.start, span.end)).length })
+  if (scanned.compilerHeaders !== retained.compilerHeaders || scanned.statusBlocks !== retained.statusBlocks) return declined('diagnostic-coverage-mismatch')
+  return Object.freeze({ grammarVersion: 'compiler-location-headers-v1', stage: 'validated-selection-before-downstream-retention', sourceHash: verified.sourceHash, scanned, retained })
+}
+
 function guardsFor(text) {
   const lines = text.split(/\r?\n/).map(line => line.trim())
   return {
@@ -53,7 +69,7 @@ export function prepareDiagnosticEvidence(text, { maxInputBytes, maxBlocks } = {
     const guards = guardsFor(block)
     // Diagnostic blocks (including notes) stay mandatory even if a lexical
     // guard misses their details. Only explicit informational blocks can drop.
-    const required = !informationalStart.test(firstLine) || Object.values(guards).some(values => values.length > 0)
+    const required = !informationalStart.test(firstLine) || Object.values(guards).some(values => values.length > 0) || [...block.matchAll(compilerHeader)].length > 0
     for (const values of Object.values(guards)) Object.freeze(values)
     const startLine = text.slice(0, boundary.start).split('\n').length
     spans.push(Object.freeze({ id: `d${index + 1}`, ...boundary, text: block, startLine,
@@ -83,7 +99,10 @@ export function validateDiagnosticSelection(text, prepared, selectedIds) {
   const verified = prepareDiagnosticEvidence(text, { maxInputBytes: Math.max(1, Buffer.byteLength(text)), maxBlocks: Math.max(1, prepared.spans.length) })
   if (verified.status !== 'prepared' || JSON.stringify(verified) !== JSON.stringify(prepared)) return declined('invalid-evidence-manifest')
   const spans = Object.freeze(verified.spans.filter(span => selectedIds.includes(span.id)))
+  const coverage = selectionCoverage(text, verified, spans)
+  if (coverage?.status === 'declined') return coverage
   return Object.freeze({ status: 'selected', strategy: STRATEGY, sourceHash: verified.sourceHash,
+    ...(coverage ? { coverage } : {}),
     selectedIds: Object.freeze(spans.map(span => span.id)), spans,
     text: spans.map(span => `[Source diagnostic ${span.id}; lines ${span.startLine}-${span.endLine}; UTF-16 ${span.start}:${span.end}]\n${text.slice(span.start, span.end)}`).join('\n\n') })
 }

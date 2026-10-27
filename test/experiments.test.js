@@ -424,3 +424,34 @@ test('trial refunds pre-call abort during archive and preserves size and protect
     assert.equal(reports(guarded)[0].reason, expected)
   }
 })
+
+test('compiler coverage is source-bound, rendered with lossy guidance, archived and subject to existing gates', async () => {
+  const diagnosticText = ['INFO: ' + 'ordinary build progress '.repeat(500), 'src/main.ts:1:2: error TS2322: bad', 'Status: failed\nexit code: 1'].join('\n\n')
+  const original = { isError: false, content: [{ type: 'text', text: diagnosticText }], value: { unchanged: true } }
+  const behavior = { responseFor: () => '{"selectedIds":["d2","d3"]}' }
+  const f = setup({ selectionMode: 'diagnostic-evidence' }, behavior)
+  const output = await f.handler(execution(), original, async () => ({ kind: 'accept' }))
+  assert.match(output.content[0].text, /Compiler header coverage \(supported grammar only, not semantic completeness\)/)
+  assert.match(output.content[0].text, /LOSSY/)
+  assert.match(output.content[0].text, /recover the original for missing evidence, completeness checks/)
+  const coverage = JSON.parse(f.saves[1].content).coverage
+  assert.equal(coverage.stage, 'validated-selection-before-downstream-retention')
+  assert.match(output.content[0].text, /NOT final inline coverage/)
+  assert.match(output.content[0].text, /recover the full spilled tool output/)
+  assert.deepEqual(coverage.scanned, { compilerHeaders: 1, statusBlocks: 1 })
+  assert.deepEqual(coverage.retained, coverage.scanned)
+  assert.equal(coverage.sourceHash, JSON.parse(f.saves[1].content).sourceHash)
+  for (const overrides of [{ protectedTerms: ['ordinary'] }, { comparatorTokenCap: 1, minimumFutureRequests: 1000000 }, { minSavingsTokens: 100000 }]) {
+    const guarded = setup({ selectionMode: 'diagnostic-evidence', ...overrides }, behavior)
+    const declined = await guarded.handler(execution(), original, async () => ({ kind: 'accept' }))
+    assert.equal(declined.content, undefined)
+  }
+})
+test('generic diagnostics never render compiler coverage', async () => {
+  const f = setup({ selectionMode: 'diagnostic-evidence' }, { responseFor: () => '{"selectedIds":["d2"]}' })
+  const original = { isError: false, content: [{ type: 'text', text: 'INFO: ' + 'ordinary progress '.repeat(500) + '\n\nERROR: generic failure' }] }
+  const output = await f.handler(execution(), original, async () => ({ kind: 'accept' }))
+  assert.ok(output.content)
+  assert.equal(output.content[0].text.includes('Compiler header coverage'), false)
+  assert.equal(JSON.parse(f.saves[1].content).coverage, undefined)
+})

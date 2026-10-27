@@ -71,3 +71,34 @@ test('byte/block limits and CRLF offsets are exact', () => {
   assert.equal(prepareDiagnosticEvidence(text, { ...budgets, maxBlocks: 1 }).reason, 'diagnostic-block-budget')
   assert.throws(() => prepareDiagnosticEvidence(text, { ...budgets, maxBlocks: 0 }))
 })
+
+test('coverage counts compiler header occurrences and status blocks across exact selected spans', () => {
+  const text = ['INFO: ordinary progress', 'src/a.ts(1,2): error TS2322: bad\nC:\\src\\b.c:3:4: warning: bad\n  ./c.cc:5:6: note: context', 'Status: failed\nErrors: 2\nexit code: 1'].join('\r\n\r\n')
+  const prepared = prepareDiagnosticEvidence(text, budgets)
+  const selected = validateDiagnosticSelection(text, prepared, prepared.requiredIds)
+  assert.deepEqual(selected.coverage, { grammarVersion: 'compiler-location-headers-v1', stage: 'validated-selection-before-downstream-retention', sourceHash: prepared.sourceHash,
+    scanned: { compilerHeaders: 3, statusBlocks: 1 }, retained: { compilerHeaders: 3, statusBlocks: 1 } })
+  assert.equal(Object.isFrozen(selected.coverage.scanned), true)
+})
+test('header inside INFO remains mandatory and cannot acquire forged coverage', () => {
+  const text = 'INFO: compiler detail\n  src/main.ts:4:2: error TS1234: bad\n\nStatus: failed'
+  const prepared = prepareDiagnosticEvidence(text, budgets)
+  assert.deepEqual(prepared.requiredIds, ['d1', 'd2'])
+  assert.equal(validateDiagnosticSelection(text, prepared, ['d2']).status, 'declined')
+  assert.equal(validateDiagnosticSelection(text, prepared, prepared.requiredIds).coverage.scanned.compilerHeaders, 1)
+  assert.equal(validateDiagnosticSelection(text, { ...prepared, coverage: { scanned: { compilerHeaders: 0 } } }, prepared.requiredIds).reason, 'invalid-evidence-manifest')
+})
+test('zero supported headers do not claim compiler coverage', () => {
+  for (const text of ['ERROR: generic failure\n\nStatus: failed', 'src/main.c:4: error: line-only location\n\nStatus: failed', 'INFO: quote src/main.c:4:2: error: inline mention\n\nStatus: failed']) {
+    const prepared = prepareDiagnosticEvidence(text, budgets)
+    assert.equal(validateDiagnosticSelection(text, prepared, prepared.requiredIds).coverage, undefined)
+  }
+})
+
+test('column-qualified notes in informational blocks remain mandatory without severity keywords', () => {
+  const text = 'INFO: details\nmodule:1:2: note: context\n\nStatus: done'
+  const prepared = prepareDiagnosticEvidence(text, budgets)
+  assert.deepEqual(prepared.requiredIds, ['d1', 'd2'])
+  assert.equal(validateDiagnosticSelection(text, prepared, ['d2']).reason, 'protected-diagnostic-omitted')
+  assert.equal(validateDiagnosticSelection(text, prepared, prepared.requiredIds).coverage.scanned.compilerHeaders, 1)
+})
