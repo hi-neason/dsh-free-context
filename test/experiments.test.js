@@ -479,3 +479,17 @@ test('only audit reference omits duplicate prose while both receipts and recover
   assert.ok(Buffer.byteLength(full) - Buffer.byteLength(compact) > 400)
   assert.equal(JSON.parse(f.saves[1].content).originalReceipt.sha256, refs[0].sha256)
 })
+
+test('selection diagnostics identify exact selected IDs without logging source text', async () => {
+  const { createHash } = await import('node:crypto')
+  const { handler, events } = setup()
+  await handler(execution(), result(), async () => ({ kind: 'accept' }))
+  const record = events.find(event => event.event === 'free-context/experiment').record
+  assert.deepEqual(record.selectedIds, ['p1'])
+  assert.equal(record.sourceHash, createHash('sha256').update(text).digest('hex'))
+  assert.equal(Object.isFrozen(record.selectedIds), true)
+  assert.equal(JSON.stringify(record).includes(text.split('\n\n')[0]), false)
+  const declined = setup({}, { invalidResponse: true })
+  await declined.handler(execution(), result(), async () => ({ kind: 'accept' }))
+  assert.equal(declined.events.find(event => event.event === 'free-context/experiment').record.selectedIds, undefined)
+})

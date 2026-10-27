@@ -133,6 +133,7 @@ export function apply(ctx, input) {
       diagnosticsComplete = await reportDecision(record => ctx.parallel('free-context/experiment', record), warn, {
         tool: exec.name, callId: exec.callId, sessionId: exec.agent?.session?.header?.id,
         mode: config.mode, admission: config.admission, ...(trial ? { predictedSavings: null, trialBudget: trialBudget?.snapshot() } : {}), reason, queryHash: selection?.queryHash, cacheHit: selection?.cacheHit ?? false, llmCalled: selection?.llmCalled ?? false,
+        ...(selection?.status === 'selected' ? { sourceHash: selection.sourceHash, selectedIds: selection.selectedIds } : {}),
         callUsage: selection?.callUsage, estimatedCost, comparatorTokenCap: config.comparatorTokenCap, futureCacheReadPerMillion: trial ? undefined : config.futureCacheReadPerMillion, currency: config.pricing?.currency, callCostUpperEstimate,
       }, { signal: exec.signal })
     }
