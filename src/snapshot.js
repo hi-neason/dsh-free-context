@@ -74,8 +74,8 @@ export function snapshotReferenceId(receipt) {
 export function formatSnapshotReference(receipt) {
   return [
     `Original tool-result snapshot: ${JSON.stringify(receipt)}`,
-    `Snapshot referenceId: ${snapshotReferenceId(receipt)}. If free_context_recall is installed, use this registered ID for verified Unicode pages.`,
-    'Use the backend retrievalHint to retrieve this exact snapshot. Use existing read/grep tools when supported by that backend; read all pages for full recovery. Do not substitute the current source file.',
+    `Snapshot referenceId: ${snapshotReferenceId(receipt)}. For verified recovery, use this registered ID with free_context_recall if installed.`,
+    'Retrieve this snapshot when the task requires omitted evidence, a completeness check, or the exact original. Use the backend retrievalHint and existing read/grep tools when supported; read all pages for full recovery. Do not substitute the current source file.',
     'For full recovery, verify the UTF-8 byte count and SHA-256 of the complete retrieved text against this receipt. A partial read or grep match does not verify the full snapshot.',
   ].join('\n')
 }
