@@ -1,6 +1,6 @@
 const budgets = ['maxInputBytes', 'maxPromptBytes', 'maxOutputBytes', 'maxOutputTokens', 'maxArtifactBytes', 'timeoutMs', 'maxParagraphs']
 const amounts = ['maxTotalCost', 'maxCallCost', 'expectedRecoveryCost', 'safetyMargin', 'futureCacheReadPerMillion']
-const keys = ['admission', 'maxCalls', 'selectionMode', 'maxQueryBytes', 'mode', 'tools', 'provider', 'model', ...budgets, ...amounts, 'maxCacheEntries', 'maxInFlight', 'protectedTerms', 'pricing', 'minimumFutureRequests', 'minSavingsTokens', 'comparatorTokenCap']
+const keys = ['promptEncoding', 'admission', 'maxCalls', 'selectionMode', 'maxQueryBytes', 'mode', 'tools', 'provider', 'model', ...budgets, ...amounts, 'maxCacheEntries', 'maxInFlight', 'protectedTerms', 'pricing', 'minimumFutureRequests', 'minSavingsTokens', 'comparatorTokenCap']
 const priceKeys = ['currency', 'uncachedInputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion', 'outputPerMillion']
 function object(value, allowed, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError(`${label} must be an object`)
@@ -17,7 +17,8 @@ function strings(value, label) {
 
 export function parseExperimentConfig(input = {}) {
   object(input, keys, 'experiment config')
-  const config = { admission: 'forecast', selectionMode: 'task-independent', mode: 'off', tools: [], maxInFlight: 4, maxCacheEntries: 0, protectedTerms: [], minSavingsTokens: 32, ...input }
+  const config = { promptEncoding: 'plain', admission: 'forecast', selectionMode: 'task-independent', mode: 'off', tools: [], maxInFlight: 4, maxCacheEntries: 0, protectedTerms: [], minSavingsTokens: 32, ...input }
+  if (!['plain', 'auto'].includes(config.promptEncoding)) throw new TypeError('Invalid promptEncoding')
   if (!['forecast', 'measured-trial'].includes(config.admission)) throw new TypeError('Invalid admission')
   if (!['task-independent', 'query-dependent', 'diagnostic-evidence'].includes(config.selectionMode)) throw new TypeError('Invalid selectionMode')
   if (!['off', 'observe', 'apply'].includes(config.mode)) throw new TypeError('Invalid mode')

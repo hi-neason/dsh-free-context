@@ -439,3 +439,96 @@ test('all selector modes send only exact ID/text and retain local source validat
     assert.deepEqual(selected.audit.request.messages, llm.calls[0].messages)
   }
 })
+
+test('prompt encoding is strictly validated and defaults to plain in both entry points', async () => {
+  const { parseExperimentConfig } = await import('../src/experiment-config.js')
+  assert.equal(parseExperimentConfig().promptEncoding, 'plain')
+  for (const promptEncoding of ['auto', 'plain']) {
+    assert.equal(parseExperimentConfig({ promptEncoding }).promptEncoding, promptEncoding)
+    assert.doesNotThrow(() => createTextSelector({ ...config(runtime()), promptEncoding }))
+  }
+  for (const promptEncoding of ['gzip', '', null, 1, {}]) {
+    assert.throws(() => parseExperimentConfig({ promptEncoding }), /promptEncoding/)
+    assert.throws(() => createTextSelector({ ...config(runtime()), promptEncoding }), /promptEncoding/)
+  }
+})
+
+test('auto compares full messages, falls back for unique text, and preserves source selection and query', async () => {
+  const { decodeSourceSpans } = await import('../src/selector-prompt.js')
+  for (const selectionMode of ['task-independent', 'query-dependent']) {
+    for (const text of [source, 'Repeated sentence with exact evidence. '.repeat(100) + '\n\nKEEP this protected fact.']) {
+      const plainHost = runtime('{"selectedIds":["p2"]}')
+      const autoHost = runtime('{"selectedIds":["p2"]}')
+      const options = { selectionMode, maxQueryBytes: 100 }
+      const input = { kind: 'prose', text, query: '中文 query unchanged' }
+      const plain = createTextSelector({ ...config(plainHost), ...options, promptEncoding: 'plain' })
+      const auto = createTextSelector({ ...config(autoHost), ...options, promptEncoding: 'auto' })
+      const plainToken = plain.prepare(input)
+      const autoToken = auto.prepare(input)
+      const plainResult = await plain.execute(plainToken)
+      const autoResult = await auto.execute(autoToken)
+      const plainMessages = plainHost.calls[0].messages
+      const autoMessages = autoHost.calls[0].messages
+      assert.equal(autoToken.requestBytes, Buffer.byteLength(JSON.stringify(autoMessages)))
+      assert.deepEqual(autoResult.audit.request.messages, autoMessages)
+      assert.deepEqual(autoResult.spans, plainResult.spans)
+      const payload = JSON.parse(autoMessages[0].content[0].text.split('\n').at(-1))
+      const plainPayload = JSON.parse(plainMessages[0].content[0].text.split('\n').at(-1))
+      assert.deepEqual(payload.requiredIds, plainPayload.requiredIds)
+      assert.equal(payload.currentTask, plainPayload.currentTask)
+      if (text === source) assert.deepEqual(autoMessages, plainMessages)
+      else {
+        assert.ok(autoToken.requestBytes < plainToken.requestBytes)
+        assert.deepEqual(decodeSourceSpans(payload.paragraphs, { maxBytes: 10000 }), plainPayload.paragraphs)
+        assert.match(autoMessages[0].content[0].text, /dictionary/)
+        const bounded = createTextSelector({ ...config(runtime()), ...options, promptEncoding: 'auto', maxPromptBytes: autoToken.requestBytes })
+        assert.equal(bounded.prepare(input).status, 'prepared')
+      }
+    }
+  }
+})
+
+test('encoded diagnostics retain all required IDs, exact source metadata and omission guards', async () => {
+  const { decodeSourceSpans } = await import('../src/selector-prompt.js')
+  const text = diagnostics.replace('INFO: ordinary progress.', 'INFO: ' + 'Ordinary progress for the current package. '.repeat(100))
+  const hosts = [runtime('{"selectedIds":["d1","d3","d4"]}'), runtime('{"selectedIds":["d1","d3","d4"]}')]
+  const results = []
+  for (const [index, promptEncoding] of ['plain', 'auto'].entries()) {
+    results.push(await createTextSelector({ ...config(hosts[index]), selectionMode: 'diagnostic-evidence', promptEncoding })({ kind: 'diagnostic', text }))
+  }
+  assert.equal(results[1].status, 'selected')
+  assert.deepEqual(results[1].spans, results[0].spans)
+  assert.equal(results[1].text, results[0].text)
+  const [plain, auto] = hosts.map(host => JSON.parse(host.calls[0].messages[0].content[0].text.split('\n').at(-1)))
+  assert.deepEqual(auto.requiredIds, ['d1', 'd3', 'd4'])
+  assert.deepEqual(decodeSourceSpans(auto.sourceBlocks, { maxBytes: 10000 }), plain.sourceBlocks)
+  const omitted = await createTextSelector({ ...config(runtime('{"selectedIds":["d1"]}')), selectionMode: 'diagnostic-evidence', promptEncoding: 'auto' })({ kind: 'diagnostic', text })
+  assert.equal(omitted.reason, 'protected-diagnostic-omitted')
+})
+
+test('encoding savings must cover decoder instructions as part of the full request', async () => {
+  const { encodeSourceSpans } = await import('../src/selector-prompt.js')
+  const text = 'Repeated moderately long sentence. '.repeat(5)
+  const spans = [{ id: 'p1', text }]
+  assert.ok(JSON.stringify(encodeSourceSpans(spans)).length < JSON.stringify(spans).length)
+  const hosts = [runtime('{"selectedIds":["p1"]}'), runtime('{"selectedIds":["p1"]}')]
+  for (const [index, promptEncoding] of ['plain', 'auto'].entries()) {
+    await createTextSelector({ ...config(hosts[index]), promptEncoding })({ kind: 'prose', text })
+  }
+  assert.deepEqual(hosts[0].calls[0].messages, hosts[1].calls[0].messages)
+})
+
+test('failed codec invariants visibly decline before any paid plain fallback', async t => {
+  const text = 'Repeated source evidence. '.repeat(60)
+  const llm = runtime('{"selectedIds":["p1"]}')
+  const select = createTextSelector({ ...config(llm), promptEncoding: 'auto', protectedTerms: [] })
+  for (const implementation of [() => 'corrupted', () => { throw new Error('codec failure') }]) {
+    const patch = t.mock.method(String.prototype, 'repeat', implementation)
+    let result
+    try { result = await select({ kind: 'prose', text }) }
+    finally { patch.mock.restore() }
+    assert.equal(result.status, 'declined')
+    assert.equal(result.reason, 'prompt-encoding-failure')
+    assert.equal(llm.calls.length, 0)
+  }
+})
