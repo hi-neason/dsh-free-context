@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createAcceptancePlanV2 } from '../scripts/acceptance-benchmark-v2.js'
-import { originalAcceptance, verifyShortHorizonBacktest } from '../scripts/acceptance-evidence.js'
+import { originalAcceptance, verifyShortHorizonBacktest, inspectOriginalCalibration } from '../scripts/acceptance-evidence.js'
 import { calibrateRetirementReports, retirementEvidenceHash } from '../scripts/calibrate-retirement.js'
 
 // All data here is synthetic contract-test data. It proves no real model benefit.
@@ -113,4 +113,21 @@ test('a self-consistent calibration from a different runner configuration cannot
   const result = originalAcceptance(benchmark(), data.calibration, data.backtest)
   assert.equal(result.calibrationEvidenceComplete, false)
   assert.equal(result.accepted, false)
+})
+
+
+test('shared calibration inspection certifies evidence only, with no benchmark acceptance shortcut', () => {
+  const data = evidence()
+  const result = inspectOriginalCalibration(benchmark(), data.calibration, data.backtest)
+  assert.equal(result.calibrationEvidenceComplete, true)
+  assert.equal(result.shortHorizonBacktestPassed, true)
+  assert.equal(Object.hasOwn(result, 'accepted'), false)
+  assert.equal(Object.hasOwn(result, 'benchmarkAccepted'), false)
+  assert.equal(inspectOriginalCalibration(benchmark()).calibrationEvidenceComplete, false)
+  const changed = structuredClone(benchmark())
+  changed.provenance.sourceTreeHash = 'f'.repeat(64)
+  assert.equal(inspectOriginalCalibration(changed, data.calibration, data.backtest).calibrationEvidenceComplete, false)
+  data.backtest.report = structuredClone(data.calibration.reports[0])
+  data.backtest.expectedReportHash = retirementEvidenceHash(data.backtest.report)
+  assert.equal(inspectOriginalCalibration(benchmark(), data.calibration, data.backtest).shortHorizonBacktestPassed, false)
 })

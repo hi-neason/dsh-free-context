@@ -58,6 +58,16 @@ export function originalAcceptance(report, calibrationEvidence, negativeBacktest
     benchmarkAccepted = report?.evaluationKind === 'acceptance-v2-live-provider' &&
       summarizeAcceptanceV2(report.plan, report.results, { replay: false, pricing: report.pricing, provenance: report.provenance }).fullAccepted === true
   } catch {}
+  const evidence = inspectOriginalCalibration(report, calibrationEvidence, negativeBacktest)
+  return { accepted: benchmarkAccepted && evidence.calibrationEvidenceComplete && evidence.shortHorizonBacktestPassed,
+    benchmarkAccepted, ...evidence,
+    claimBoundary: 'Acceptance applies only to the frozen benchmark and internally consistent calibration/backtest evidence; it does not guarantee savings on other workloads.' }
+}
+
+/** Validate comparable calibration and disjoint held-out evidence only.
+ * Benchmark quality, adoption and savings must be independently evaluated.
+ */
+export function inspectOriginalCalibration(report, calibrationEvidence, negativeBacktest) {
   const { reports, expectedRunIds } = calibrationEvidence ?? {}
   const membershipComplete = Array.isArray(expectedRunIds) && expectedRunIds.length >= 3 && expectedRunIds.length <= 64 &&
     expectedRunIds.every(id => typeof id === 'string' && id.trim()) && new Set(expectedRunIds).size === expectedRunIds.length &&
@@ -70,7 +80,5 @@ export function originalAcceptance(report, calibrationEvidence, negativeBacktest
   const backtest = overlapsCalibration ? { passed: false, reason: 'backtest-overlaps-calibration' }
     : verifyShortHorizonBacktest(negativeBacktest, calibration)
   const calibrationEvidenceComplete = calibration.status === 'calibrated'
-  return { accepted: benchmarkAccepted && calibrationEvidenceComplete && backtest.passed,
-    benchmarkAccepted, calibrationEvidenceComplete, shortHorizonBacktestPassed: backtest.passed, calibration, backtest,
-    claimBoundary: 'Acceptance applies only to the frozen benchmark and internally consistent calibration/backtest evidence; it does not guarantee savings on other workloads.' }
+  return { calibrationEvidenceComplete, shortHorizonBacktestPassed: backtest.passed, calibration, backtest }
 }
