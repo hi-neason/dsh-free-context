@@ -320,6 +320,29 @@ const experiment = await ctx.plugin(Experiments, experimentConfig)
 
 已用官方 dsh runtime/provider 和 `deepseek-flash` 完成一次合成文本观察探针：实际输入 4,224 token、输出 9 token，保留保护段落；第二次命中缓存且无新模型调用，两次均保持原工具内容。该探针和 fake-adapter 集成测试验证了接口、归档、保护规则及失败边界，不是完整任务质量或账单收益证明；演示价格换算不等于供应商实收。
 
+### 有预算的真实试验
+
+默认 `admission: 'forecast'` 要求压缩预测收益覆盖成本；命中已经完成的选择缓存时不再计新增模型费用。可选 `comparatorTokenCap` 同时限制基线与候选的预测体积，例如与原生 1200 上限比较，避免按完整原文高估增量收益。
+
+为收集完整任务的真实收益证据，可以显式采用 `admission: 'measured-trial'`。它允许在预算内试用候选，跳过预测净收益准入；仍要求原文与审计归档、保护证据、完整用量、查询一致、输出缩减和实际单次费用检查。试验采用不代表已证明获益，审计和事件明确记录 `predictedSavings: null`。
+
+在已有实验配置上设置：
+
+```js
+const trialConfig = {
+  ...experimentConfig,
+  admission: 'measured-trial',
+  maxCalls: 2,
+  maxTotalCost: 0.03, // USD；辅助调用的会话预算示例。
+  maxCallCost: 0.02,
+  pricing: verifiedAuxiliaryPrices, // 必须显式提供 USD 及全部四种单价。
+}
+```
+
+`verifiedAuxiliaryPrices` 包含 `currency`、`uncachedInputPerMillion`、`cacheReadPerMillion`、`cacheWritePerMillion` 和 `outputPerMillion`；填写实际服务的适用价格。试验模式不需要未来请求数和未来缓存读价假设。调用前按估算原子预留，确认没有新增调用才退回；付费失败、用量不完整或超出估算时封闭后续付费准入。已完成缓存仍可复用。
+
+该预算仅属于插件实例中的 live Session 对象，重启、重开或另一个插件实例会重新计数；它不是持久化总预算，也不是供应商账单硬上限。`observe` 同样可能花费辅助调用费用。完整任务成本还必须另行包括主模型、回读、缓存与重试，并通过质量、实际采用和净收益对照才能验收。
+
 ## 当前任务相关的段落选择实验
 
 同一个实验插件可显式设置 `selectionMode: 'query-dependent'`，复用上述选择、归档、费用与失败保护流程。默认仍是 `task-independent`，不会读取任务。查询模式通过调用方提供的同步 `freeContextQuery.getQuery` 服务获取当前任务，不读取历史消息，也不会把工具参数或 `agent/pre-step` inbox 当作完整任务。
