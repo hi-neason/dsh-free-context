@@ -17,3 +17,23 @@ test('evaluation subprocess retains real exit status and both streams after owne
   assert.equal(result.cleaned, true)
   assert.equal(result.stopReason, null)
 })
+
+test('cleanup requires group disappearance even when a racing signal reports EPERM', { skip: process.platform === 'win32' }, async () => {
+  const original = process.kill
+  for (const confirmGone of [true, false]) {
+    let inspected = false
+    process.kill = function(pid, signal) {
+      if (pid < 0 && (signal === 'SIGKILL' || !confirmGone && signal === 0)) {
+        inspected = true
+        throw Object.assign(new Error('test-only permission race'), { code: 'EPERM' })
+      }
+      return original.call(process, pid, signal)
+    }
+    try {
+      const result = await runEvaluationProcess(process.execPath, ['-e', 'process.exit(0)'], { cwd: process.cwd(), env: {}, timeoutMs: 1000 })
+      assert.equal(inspected, true)
+      assert.equal(result.exitCode, 0)
+      assert.equal(result.cleaned, confirmGone)
+    } finally { process.kill = original }
+  }
+})

@@ -4,9 +4,9 @@ import { setTimeout as delay } from 'node:timers/promises'
 
 async function finishProcessGroup(pid) {
   if (!pid) return
-  try { process.kill(-pid, 'SIGKILL') } catch (error) { if (error.code === 'ESRCH') return; throw error }
+  try { process.kill(-pid, 'SIGKILL') } catch (error) { if (error.code === 'ESRCH') return; if (error.code !== 'EPERM') throw error }
   for (let attempt = 0; attempt < 100; attempt++) {
-    try { process.kill(-pid, 0) } catch (error) { if (error.code === 'ESRCH') return; throw error }
+    try { process.kill(-pid, 0) } catch (error) { if (error.code === 'ESRCH') return; if (error.code !== 'EPERM') throw error }
     await delay(10)
   }
   throw new Error('Verification process group cleanup unconfirmed')
@@ -20,12 +20,12 @@ export async function runEvaluationProcess(command, args, { cwd, env, timeoutMs 
   return new Promise(resolveResult => {
     const child = spawn(command, args, { cwd, detached: true, env, stdio: ['ignore', 'pipe', 'pipe'] })
     const chunks = [], errors = []
-    let size = 0, stopReason = null, signalFailed = false
+    let size = 0, stopReason = null, signalErrorCode = null
     const stop = reason => {
       if (stopReason !== null) return
       stopReason = reason
       if (child.pid) {
-        try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') signalFailed = true }
+        try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') signalErrorCode ??= error.code ?? 'UNKNOWN' }
       }
     }
     const timer = setTimeout(() => stop('timeout'), timeoutMs)
@@ -40,10 +40,9 @@ export async function runEvaluationProcess(command, args, { cwd, env, timeoutMs 
     child.once('error', () => { stopReason ??= 'spawn-error' })
     child.once('close', async exitCode => {
       clearTimeout(timer)
-      let cleaned = !signalFailed
+      let cleaned = true
       try { await finishProcessGroup(child.pid) } catch { cleaned = false }
-      resolveResult({ pid: child.pid ?? null, stdout: Buffer.concat(chunks).toString('utf8'), stderr: Buffer.concat(errors).toString('utf8'), exitCode, stopReason, cleaned })
+      resolveResult({ pid: child.pid ?? null, stdout: Buffer.concat(chunks).toString('utf8'), stderr: Buffer.concat(errors).toString('utf8'), exitCode, stopReason, cleaned, signalErrorCode })
     })
   })
 }
-
