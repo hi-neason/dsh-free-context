@@ -59,6 +59,8 @@ for (const id of ['history-retirement-short', 'history-retirement-stress']) for 
 test('pre-discovery v4 manifests cannot be mixed into the revised protocol', () => {
   const revised = createAcceptancePlanV4()
   const prior = structuredClone(revised)
+  // Reconstruct the historical protocol, including its original response cap.
+  prior.experimentSettings.maxOutputTokens = 120
   for (const task of prior.tasks.filter(task => task.historyRetirement)) delete task.discoverSourcePath
   delete prior.manifestHash
   prior.manifestHash = createHash('sha256').update(JSON.stringify(prior)).digest('hex')

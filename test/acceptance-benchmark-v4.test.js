@@ -108,7 +108,7 @@ test('missing, duplicate, altered-plan and old-protocol evidence cannot pass', (
   changed.tasks.find(task => task.id === 'experiment-query-dependent').rejectPlaceholderValues = false
   assert.equal(summarizeAcceptanceV4(changed, data, options).planValid, false)
   const badConfig = structuredClone(plan)
-  badConfig.experimentSettings.maxOutputTokens = 400
+  badConfig.experimentSettings.maxOutputTokens = 120
   assert.equal(summarizeAcceptanceV4(badConfig, data, options).accepted, false)
   assert.equal(summarizeAcceptanceV4(createAcceptancePlanV2(), data, options).accepted, false)
 })
@@ -139,7 +139,7 @@ test('per-mode quality, actual adoption and protocol settings are required despi
     row => { row.adoptions[0].persistedContentHash = 'd'.repeat(64) },
     row => { row.requestedProtocol.rejectPlaceholderValues = false },
     row => { row.requestedProtocol.experimentalConfig.admission = 'net-benefit' },
-    row => { row.requestedProtocol.experimentalConfig.maxOutputTokens = 400 },
+    row => { row.requestedProtocol.experimentalConfig.maxOutputTokens = 120 },
     row => { row.configuration.maxInlineTokens = 12500 },
     row => { row.configuration.validationFeedbackLimit = 1 },
     row => { row.configuration.maxSteps = 13 },
@@ -532,4 +532,28 @@ test('v4 selector pricing does not invent a zero rate for unquoted cache writes'
   for (const rate of [0, .25]) {
     assert.equal(experimentalConfigV4(fixture, { pricing: { ...unquoted, cacheWrite: rate } }).pricing.cacheWritePerMillion, rate)
   }
+})
+
+test('the prospective 400-token response budget preserves money gates and rejects relabelled 120-token evidence', () => {
+  const plan = createAcceptancePlanV4()
+  const { maxOutputTokens, ...settings } = plan.experimentSettings
+  const { maxOutputTokens: oldLimit, ...oldSettings } = createAcceptancePlanV3().experimentSettings
+  assert.equal(oldLimit, 120)
+  assert.equal(maxOutputTokens, 400)
+  assert.deepEqual(settings, oldSettings)
+  assert.equal(settings.maxOutputBytes, 2000)
+  assert.equal(settings.maxCallCost, .02)
+  assert.equal(settings.maxTotalCost, .03)
+  assert.equal(plan.runs.length, 117)
+  const oldPlan = structuredClone(plan)
+  oldPlan.experimentSettings.maxOutputTokens = 120
+  const { manifestHash, ...oldContent } = oldPlan
+  oldPlan.manifestHash = retirementEvidenceHash(oldContent)
+  assert.notEqual(plan.manifestHash, oldPlan.manifestHash)
+  assert.equal(summarizeAcceptanceV4(oldPlan, records(oldPlan), options).planValid, false)
+  const relabelled = records(plan)
+  selected(relabelled).requestedProtocol.experimentalConfig.maxOutputTokens = 120
+  const rejected = summarizeAcceptanceV4(plan, relabelled, options)
+  assert.equal(rejected.configurationComplete, false)
+  assert.equal(rejected.fullAccepted, false)
 })

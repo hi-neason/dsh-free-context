@@ -23,7 +23,7 @@ function deepFreeze(value, seen = new WeakSet()) {
 }
 const frozenCopy = value => deepFreeze(structuredClone(value))
 const experimentSettings = Object.freeze({ promptEncoding: 'auto', admission: 'measured-trial', mode: 'apply', tools: Object.freeze(['fixture']),
-  maxInputBytes: 100000, maxPromptBytes: 120000, maxOutputBytes: 2000, maxOutputTokens: 120, maxArtifactBytes: 160000,
+  maxInputBytes: 100000, maxPromptBytes: 120000, maxOutputBytes: 2000, maxOutputTokens: 400, maxArtifactBytes: 160000,
   timeoutMs: 30000, maxParagraphs: 1000, maxQueryBytes: 4096, maxCacheEntries: 8, maxCalls: 2,
   maxTotalCost: .03, maxCallCost: .02, comparatorTokenCap: 1200 })
 
