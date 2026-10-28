@@ -152,7 +152,7 @@ test('pure root plan pins canonical 141 live / 138 replay slots, identities and 
   assert.equal(plan.calibration.policy.excerptCharacters, 64)
   assert.equal(plan.developmentPlan.runtimeLockHash, inputs.runtimes.cli.lockHash)
   for (const slot of plan.slots) assert.deepEqual(slot.budget, slot.kind === 'development'
-    ? { maxCalls: 16, maxCostUSD: .05, maxSteps: 12, timeoutMs: 90000 }
+    ? { maxCalls: 24, maxCostUSD: .05, maxSteps: 20, timeoutMs: 90000 }
     : { maxCalls: 14, maxCostUSD: .05, maxSteps: 12, timeoutMs: 120000 })
   caller.pricing.output = 99; caller.provenance.sourceTreeHash = '0'.repeat(64); caller.runtimes.agent.lockHash = '0'.repeat(64)
   assert.deepEqual(plan.inputs.pricing, pricing)
@@ -536,4 +536,40 @@ test('root development identity requires the independently frozen validator hash
   assert.throws(() => createAcceptanceBundlePlanV4({ ...inputs, developmentIdentity: { ...inputs.developmentIdentity, fixtureValidationHash: 'bad' } }), TypeError)
   const plan = createAcceptanceBundlePlanV4(inputs)
   assert.equal(plan.developmentPlan.fixtureValidationHash, fixtureValidationHash)
+})
+
+test('prospective coding budget rejects internally consistent old 12-step 16-call manifests', () => {
+  const report = structuredClone(bundle())
+  const old = report.plan
+  old.developmentPlan.taskBudget.maxSteps = 12
+  old.developmentPlan.taskBudget.maxCalls = 16
+  old.developmentPlan.maxTotalCalls = Math.min(old.inputs.maxTotalCalls, 144)
+  const { manifestHash: childHash, ...child } = old.developmentPlan
+  old.developmentPlan.manifestHash = digest(child)
+  for (const slot of old.slots.filter(slot => slot.kind === 'development')) {
+    slot.budget.maxSteps = 12
+    slot.budget.maxCalls = 16
+  }
+  const { manifestHash: rootHash, ...root } = old
+  old.manifestHash = digest(root)
+  report.developmentReport.plan = old.developmentPlan
+  report.developmentReport.records = recordsFor(old.developmentPlan)
+  const result = summarizeAcceptanceBundleV4(attested(report))
+  assert.equal(result.planValid, false)
+  assert.equal(result.accepted, false)
+})
+
+test('coding slots and study reserve 20 steps and 24 calls consistently within unchanged root caps', () => {
+  const plan = createAcceptanceBundlePlanV4(inputs)
+  assert.equal(plan.developmentPlan.taskBudget.maxSteps, 20)
+  assert.equal(plan.developmentPlan.taskBudget.maxCalls, 24)
+  assert.equal(plan.developmentPlan.maxTotalCalls, 216)
+  for (const slot of plan.slots.filter(slot => slot.kind === 'development')) {
+    assert.deepEqual(slot.budget, { maxCalls: 24, maxCostUSD: .05, maxSteps: 20, timeoutMs: 90000 })
+  }
+  assert.equal(createAcceptanceBundlePlanV4({ ...inputs, maxTotalCalls: 100 }).developmentPlan.maxTotalCalls, 100)
+  assert.throws(() => createAcceptanceBundlePlanV4({ ...inputs, maxTotalCalls: 1993 }), TypeError)
+  assert.equal(plan.inputs.maxTotalCalls, 1992)
+  assert.equal(plan.criteria.qualityFailuresAllowed, 0)
+  assert.equal(plan.criteria.calibrationHeldoutMaximumRemainingRequests, 2)
 })

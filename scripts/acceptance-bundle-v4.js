@@ -15,7 +15,7 @@ const groups = ['baseline-default', 'baseline-tuned', 'plugin']
 const repository = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '')
 const digest = /^[a-f0-9]{64}$/
 const agentBudget = { maxCalls: 14, maxCostUSD: .05, maxSteps: 12, timeoutMs: 120000 }
-const developmentBudget = { maxCalls: 16, maxCostUSD: .05, maxSteps: 12, timeoutMs: 90000 }
+const developmentBudget = { maxCalls: 24, maxCostUSD: .05, maxSteps: 20, timeoutMs: 90000 }
 function freeze(value) {
   if (value && typeof value === 'object') {
     if (!Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError('Bundle inputs require plain data')
@@ -54,7 +54,7 @@ export function createAcceptanceBundlePlanV4({ rootDir, bundleId, seed = 2026102
   const benchmarkPlan = createAcceptancePlanV4({ seed })
   const developmentPlan = createDevelopmentStudyPlan({ directory: join(rootDir, 'development'), runtimeRoot: runtimes.cli.root,
     sourceTreeHash: provenance.sourceTreeHash, runtimeLockHash: runtimes.cli.lockHash, ...developmentIdentity, replay, pricing,
-    maxTotalCostUSD, maxTotalCalls: Math.min(maxTotalCalls, 144), ...taskDevelopmentBudget, maxTaskCostUSD: taskDevelopmentBudget.maxCostUSD })
+    maxTotalCostUSD, maxTotalCalls: Math.min(maxTotalCalls, 216), ...taskDevelopmentBudget, maxTaskCostUSD: taskDevelopmentBudget.maxCostUSD })
   const slots = [
     ...calibration.runs.flatMap(run => run.groups.map(group => ({ slotId: `cal/${run.runId}/${group}`, kind: 'calibration', runId: run.runId, group, budget: taskAgentBudget, conditional: false }))),
     ...(!replay ? groups.map(group => ({ slotId: `forecast/${group}`, kind: 'forecast', group, budget: taskAgentBudget, conditional: true })) : []),
