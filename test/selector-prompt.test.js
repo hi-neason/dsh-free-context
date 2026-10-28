@@ -28,12 +28,12 @@ test('decoder rejects malformed structures and expansion overflow before allocat
 
 test('v2 shares only repeated chunks and keeps unique facts literal beside their span IDs', () => {
   const source = [
-    { id: 'α', text: 'Shared. Unique 中文 😀. Second fact. Shared. ' },
-    { id: 'β', text: 'Shared. Other fact. \r\nFinal' },
+    { id: 'α', text: 'Shared operational guidance. Unique 中文 😀. Second fact. Shared operational guidance. ' },
+    { id: 'β', text: 'Shared operational guidance. Other fact. \r\nFinal' },
   ]
   const encoded = encodeSourceSpans(source)
   assert.equal(encoded.version, 2)
-  assert.deepEqual(encoded.dictionary, ['Shared. '])
+  assert.deepEqual(encoded.dictionary, ['Shared operational guidance. '])
   assert.deepEqual(encoded.spans, [
     { id: 'α', runs: [[0, 1], 'Unique 中文 😀. Second fact. ', [0, 1]] },
     { id: 'β', runs: [[0, 1], 'Other fact. \r\nFinal'] },
@@ -59,4 +59,20 @@ test('v2 handles an empty dictionary and validates inline literals before expans
     { dictionary: [], spans: [{ id: 'p1', runs: ['abc'] }] },
   ]) assert.throws(() => decodeSourceSpans(value, { maxBytes: 100 }))
   assert.throws(() => decodeSourceSpans(valid, { maxBytes: 11 }))
+})
+
+test('dictionary avoids expanding isolated repeated newline chunks beside unique facts', () => {
+  const source = [{ id: 'facts', text: Array.from({ length: 50 }, (_, i) => `Shared operational guidance repeated across records. Unique 中文 record-${i}.\n\n`).join('') }]
+  const encoded = encodeSourceSpans(source)
+  assert.deepEqual(decodeSourceSpans(encoded, { maxBytes: Buffer.byteLength(source[0].text) }), source)
+  assert.ok(encoded.dictionary.includes('Shared operational guidance repeated across records. '))
+  assert.ok(!encoded.dictionary.includes('\n'))
+})
+
+test('tiny consecutive repeats retain profitable run-length compression', () => {
+  const source = [{ id: 'blank', text: '\n'.repeat(100) }]
+  const encoded = encodeSourceSpans(source)
+  assert.deepEqual(decodeSourceSpans(encoded, { maxBytes: 100 }), source)
+  assert.deepEqual(encoded.dictionary, ['\n'])
+  assert.ok(Buffer.byteLength(JSON.stringify(encoded)) < 100)
 })

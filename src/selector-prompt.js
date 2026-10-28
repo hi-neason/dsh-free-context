@@ -19,13 +19,36 @@ export function encodeSourceSpans(spans) {
   const chunked = spans.map(({ id, text }) => ({ id, chunks: chunks(text) }))
   const counts = new Map()
   for (const span of chunked) for (const chunk of span.chunks) counts.set(chunk, (counts.get(chunk) ?? 0) + 1)
+  const referenceCosts = new Map()
+  const indexDigits = String(Math.max(0, counts.size - 1)).length
+  for (const span of chunked) {
+    for (let i = 0; i < span.chunks.length;) {
+      const chunk = span.chunks[i]
+      let end = i + 1
+      while (end < span.chunks.length && span.chunks[end] === chunk) end++
+      // [index,count] plus its separator. Consecutive tiny chunks can still
+      // be worthwhile because one reference represents the entire run.
+      referenceCosts.set(chunk, (referenceCosts.get(chunk) ?? 0) + indexDigits + String(end - i).length + 4)
+      i = end
+    }
+  }
+  const profitable = new Set([...counts].filter(([chunk, count]) => {
+    const escapedBytes = Buffer.byteLength(JSON.stringify(chunk)) - 2
+    return count > 1 && escapedBytes * count > escapedBytes + 3 + referenceCosts.get(chunk)
+  }).map(([chunk]) => chunk))
+  const original = encodeChunks(chunked, chunk => counts.get(chunk) > 1)
+  const candidate = encodeChunks(chunked, chunk => profitable.has(chunk))
+  return Buffer.byteLength(JSON.stringify(candidate)) < Buffer.byteLength(JSON.stringify(original)) ? candidate : original
+}
+
+function encodeChunks(chunked, shared) {
   const dictionary = []
   const indexes = new Map()
   return { version: 2, dictionary, spans: chunked.map(({ id, chunks }) => {
     const runs = []
     for (const chunk of chunks) {
       const last = runs.at(-1)
-      if (counts.get(chunk) === 1) {
+      if (!shared(chunk)) {
         if (typeof last === 'string') runs[runs.length - 1] += chunk
         else runs.push(chunk)
         continue
