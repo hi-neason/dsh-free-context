@@ -473,3 +473,23 @@ test('unquoted cache writes require explicit rejection policy, never a fabricate
     assert.throws(() => createAcceptanceBundlePlanV4({ ...inputs, pricing: { ...unquoted, cacheWritePolicy } }), /pricing/i)
   }
 })
+
+
+test('explicit task cost limits only tighten the original ceilings without changing coverage or quality gates', () => {
+  const original = createAcceptanceBundlePlanV4(inputs)
+  const tighter = createAcceptanceBundlePlanV4({ ...inputs, maxTaskCostUSD: .02 })
+  assert.equal(Object.hasOwn(original.inputs, 'maxTaskCostUSD'), false)
+  assert.equal(tighter.inputs.maxTaskCostUSD, .02)
+  assert.deepEqual(tighter.slots.map(({ budget, ...slot }) => slot), original.slots.map(({ budget, ...slot }) => slot))
+  for (const [index, slot] of tighter.slots.entries()) {
+    assert.equal(slot.budget.maxCostUSD, .02)
+    assert.deepEqual(slot.budget, { ...original.slots[index].budget, maxCostUSD: .02 })
+  }
+  assert.equal(tighter.developmentPlan.taskBudget.maxCostUSD, .02)
+  assert.deepEqual(tighter.criteria, original.criteria)
+  assert.deepEqual(tighter.calibration, original.calibration)
+  assert.deepEqual(tighter.benchmarkPlan, original.benchmarkPlan)
+  for (const maxTaskCostUSD of [0, -.01, .050001, Infinity, '0.02', null]) {
+    assert.throws(() => createAcceptanceBundlePlanV4({ ...inputs, maxTaskCostUSD }), /tighten/)
+  }
+})

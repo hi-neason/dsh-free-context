@@ -31,18 +31,21 @@ const configuration = group => ({ maxInlineTokens: group === 'baseline-default' 
 /** Pure prospective plan. Filesystem existence, realpath and write-once creation
  * are executor responsibilities; this checks lexical containment only. */
 export function createAcceptanceBundlePlanV4({ rootDir, bundleId, seed = 20261026, replay = true, provenance, pricing = null,
-  maxTotalCostUSD, maxTotalCalls, knownPriorSpendUSD, priorUnpricedCalls, runtimes, developmentIdentity } = {}) {
+  maxTotalCostUSD, maxTotalCalls, maxTaskCostUSD, knownPriorSpendUSD, priorUnpricedCalls, runtimes, developmentIdentity } = {}) {
   if (!isAbsolute(rootDir ?? '') || resolve(rootDir) !== rootDir || rootDir === repository || rootDir.startsWith(repository + sep) ||
       typeof bundleId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$/.test(bundleId) || typeof replay !== 'boolean') throw new TypeError('Explicit external root, bundle identity and boolean replay required')
   if (!Number.isFinite(maxTotalCostUSD) || maxTotalCostUSD < .05 || maxTotalCostUSD > 1 || !Number.isSafeInteger(maxTotalCalls) || maxTotalCalls < 1 || maxTotalCalls > 1992 ||
       !Number.isFinite(knownPriorSpendUSD) || knownPriorSpendUSD < 0 || !Number.isSafeInteger(priorUnpricedCalls) || priorUnpricedCalls < 0) throw new TypeError('Explicit bounded budget and prior spend required')
+  if (maxTaskCostUSD !== undefined && (!Number.isFinite(maxTaskCostUSD) || maxTaskCostUSD <= 0 || maxTaskCostUSD > agentBudget.maxCostUSD)) throw new TypeError('Task cost limit may only tighten the original ceiling')
   if (!validProvenance(provenance, pricing ?? { model: provenance?.model }) || typeof provenance?.model !== 'string' || !provenance.model.trim()) throw new TypeError('Complete provenance required')
   if (pricing !== null && !validEvaluationPricing(pricing) || !replay && pricing === null) throw new TypeError('Complete pricing required')
   if (!runtimes || !same(Object.keys(runtimes).sort(), ['agent', 'cli']) || Object.values(runtimes).some(runtime => !runtime || !same(Object.keys(runtime).sort(), ['lockHash', 'root', 'version']) ||
       !isAbsolute(runtime.root ?? '') || resolve(runtime.root) !== runtime.root || !digest.test(runtime.lockHash ?? '') || runtime.version !== '0.2.1-rc.2')) throw new TypeError('Both pinned rc.2 runtime identities required')
   if (provenance.runtimeLockHash !== runtimes.agent.lockHash) throw new TypeError('Agent provenance lock must match pinned runtime')
   if (!developmentIdentity || !same(Object.keys(developmentIdentity).sort(), ['fixtureInitialSourceHash', 'fixtureManifestHash']) || !Object.values(developmentIdentity).every(value => digest.test(value))) throw new TypeError('Historical development fixture identities required')
-  const inputs = copy({ rootDir, bundleId, seed, replay, provenance, pricing, maxTotalCostUSD, maxTotalCalls, knownPriorSpendUSD, priorUnpricedCalls, runtimes, developmentIdentity })
+  const inputs = copy({ rootDir, bundleId, seed, replay, provenance, pricing, maxTotalCostUSD, maxTotalCalls, knownPriorSpendUSD, priorUnpricedCalls, runtimes, developmentIdentity, ...(maxTaskCostUSD === undefined ? {} : { maxTaskCostUSD }) })
+  const taskAgentBudget = maxTaskCostUSD === undefined ? agentBudget : { ...agentBudget, maxCostUSD: maxTaskCostUSD }
+  const taskDevelopmentBudget = maxTaskCostUSD === undefined ? developmentBudget : { ...developmentBudget, maxCostUSD: maxTaskCostUSD }
   const { answer, ...fixture } = retirementDiscoveryFixtureV4()
   const calibration = { fixture, fixtureHash: hash(fixture), policy: retirementDiscoveryPolicyV4(),
     trainingRunIds: [0, 1, 2].map(index => `${bundleId}/training-${index}`), heldoutRunId: `${bundleId}/heldout` }
@@ -51,12 +54,12 @@ export function createAcceptanceBundlePlanV4({ rootDir, bundleId, seed = 2026102
   const benchmarkPlan = createAcceptancePlanV4({ seed })
   const developmentPlan = createDevelopmentStudyPlan({ directory: join(rootDir, 'development'), runtimeRoot: runtimes.cli.root,
     sourceTreeHash: provenance.sourceTreeHash, runtimeLockHash: runtimes.cli.lockHash, ...developmentIdentity, replay, pricing,
-    maxTotalCostUSD, maxTotalCalls: Math.min(maxTotalCalls, 144), ...developmentBudget, maxTaskCostUSD: developmentBudget.maxCostUSD })
+    maxTotalCostUSD, maxTotalCalls: Math.min(maxTotalCalls, 144), ...taskDevelopmentBudget, maxTaskCostUSD: taskDevelopmentBudget.maxCostUSD })
   const slots = [
-    ...calibration.runs.flatMap(run => run.groups.map(group => ({ slotId: `cal/${run.runId}/${group}`, kind: 'calibration', runId: run.runId, group, budget: agentBudget, conditional: false }))),
-    ...(!replay ? groups.map(group => ({ slotId: `forecast/${group}`, kind: 'forecast', group, budget: agentBudget, conditional: true })) : []),
-    ...benchmarkPlan.runs.map(run => ({ slotId: `benchmark/${run.runId}`, kind: 'benchmark', runId: run.runId, group: run.group, budget: agentBudget, conditional: false })),
-    ...developmentPlan.runs.map(run => ({ slotId: `development/${run.runId}`, kind: 'development', runId: run.runId, group: run.group, budget: developmentBudget, conditional: false })),
+    ...calibration.runs.flatMap(run => run.groups.map(group => ({ slotId: `cal/${run.runId}/${group}`, kind: 'calibration', runId: run.runId, group, budget: taskAgentBudget, conditional: false }))),
+    ...(!replay ? groups.map(group => ({ slotId: `forecast/${group}`, kind: 'forecast', group, budget: taskAgentBudget, conditional: true })) : []),
+    ...benchmarkPlan.runs.map(run => ({ slotId: `benchmark/${run.runId}`, kind: 'benchmark', runId: run.runId, group: run.group, budget: taskAgentBudget, conditional: false })),
+    ...developmentPlan.runs.map(run => ({ slotId: `development/${run.runId}`, kind: 'development', runId: run.runId, group: run.group, budget: taskDevelopmentBudget, conditional: false })),
   ]
   const plan = { version: 'acceptance-bundle-v4', inputs, calibration, benchmarkPlan, developmentPlan, slots,
     criteria: { qualityFailuresAllowed: 0, liveTasks: 141, replayTasks: 138, eligibleTasks: 117, eligibleRunsPerGroup: 39,

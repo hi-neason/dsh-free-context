@@ -37,7 +37,7 @@ async function runtimeIdentity(root, kind) {
 /** Execute the frozen bundle with real official runtimes. No custom runner or
  * mutable context injection is exposed; callbacks observe durable checkpoints. */
 export async function evaluateAcceptanceBundleV4({ rootDir, bundleId, seed = 20261026, replay = true, pricing = null,
-  maxTotalCostUSD, maxTotalCalls, knownPriorSpendUSD, priorUnpricedCalls,
+  maxTotalCostUSD, maxTotalCalls, maxTaskCostUSD, knownPriorSpendUSD, priorUnpricedCalls,
   agentRuntimeRoot = environmentAgentRoot, cliRuntimeRoot = process.env.DSH_CLI_RUNTIME_ROOT ?? '.omx/cli-runtime',
   key, credentialFile, onPlan, onResult } = {}) {
   if (typeof replay !== 'boolean') throw new TypeError('replay must be a boolean')
@@ -47,7 +47,7 @@ export async function evaluateAcceptanceBundleV4({ rootDir, bundleId, seed = 202
   if (!replay && ((key !== undefined) === (credentialFile !== undefined) || key !== undefined && (typeof key !== 'string' || !key.trim()) ||
     credentialFile !== undefined && (typeof credentialFile !== 'string' || !credentialFile.trim()))) throw new TypeError('Exactly one explicit live key or credentialFile required')
   const credentialPath = !replay && credentialFile !== undefined ? resolve(credentialFile) : undefined
-  const settings = copy({ bundleId, seed, replay, pricing, maxTotalCostUSD, maxTotalCalls, knownPriorSpendUSD, priorUnpricedCalls })
+  const settings = copy({ bundleId, seed, replay, pricing, maxTotalCostUSD, maxTotalCalls, knownPriorSpendUSD, priorUnpricedCalls, ...(maxTaskCostUSD === undefined ? {} : { maxTaskCostUSD }) })
   const repo = await realpath(repository)
   const root = join(await realpath(dirname(rootDir)), basename(rootDir))
   if (root === repo || root.startsWith(repo + sep)) throw new TypeError('Bundle directory must be outside the repository')

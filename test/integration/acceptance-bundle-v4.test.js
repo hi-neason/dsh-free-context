@@ -329,3 +329,22 @@ console.log(JSON.stringify({row:report?.calibrationReports?.[0]?.tasks?.[0],repo
   assert.equal(result.saved.filter(row => row.type === 'slot-result').length, 1)
   assert.equal(result.saved.find(row => row.type === 'slot-result').record.modelCalls.length, 3)
 })
+
+
+test('a tighter task cost ceiling is frozen before credentials or model execution', async t => {
+  const root = join(await directory(t), 'tighter-budget')
+  let seen = false
+  const report = await evaluateAcceptanceBundleV4({ ...options, rootDir: root, maxTaskCostUSD: .02,
+    async onPlan(plan) {
+      seen = true
+      assert.equal(plan.inputs.maxTaskCostUSD, .02)
+      assert.ok(plan.slots.every(slot => slot.budget.maxCostUSD === .02))
+      assert.equal(plan.developmentPlan.taskBudget.maxCostUSD, .02)
+      assert.deepEqual(await readJson(join(root, 'bundle-plan.json')), plan)
+      throw new Error('Stop before credentials and model execution')
+    } })
+  assert.equal(seen, true)
+  assert.equal(report.stoppedReason, 'plan-checkpoint-failed')
+  assert.equal(report.modelCalls, 0)
+  assert.equal((await journal(root)).some(row => row.type === 'slot-plan'), false)
+})
