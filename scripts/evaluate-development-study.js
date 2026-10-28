@@ -47,7 +47,7 @@ function taskPlanMatches(plan, scheduled, task) {
   const root = scheduled.directory, workspace = join(root, 'workspace'), home = join(root, 'home')
   const expected = { runId: config.runId, group: scheduled.group, replay: plan.replay, model: plan.model, pricing: plan.pricing, workspace,
     maxSteps: plan.taskBudget.maxSteps, maxCalls: plan.taskBudget.maxCalls, maxCostUSD: plan.taskBudget.maxCostUSD,
-    tools: ['bash', 'read', 'grep'], instructionMaxBytes: 0, policyInstallationOrder: ['compression-input', 'free-context-if-enabled', 'compression-output', 'native-spill', 'observer'], plugin: scheduled.group === 'plugin', maxInlineTokens: scheduled.group === 'baseline-default' ? 12500 : 1200,
+    tools: ['bash', 'read', 'grep'], instructionMaxBytes: 0, maxOutputTokens: 4096, policyInstallationOrder: ['compression-input', 'free-context-if-enabled', 'compression-output', 'native-spill', 'observer'], plugin: scheduled.group === 'plugin', maxInlineTokens: scheduled.group === 'baseline-default' ? 12500 : 1200,
     sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'), runtimePackage: join(plan.runtimeRoot, 'package.json'),
     testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
     ...(plan.replay ? { replayProvider: fileURLToPath(new URL('./development-replay-provider.js', import.meta.url)), controlSource: fileURLToPath(new URL('../test/fixtures/development/json-output-limit/control/json-codec.js', import.meta.url)) } : {}) }

@@ -48,7 +48,7 @@ function recordsFor(plan, { adopted = true, pluginCounts = [10, 10, 10] } = {}) 
   return plan.runs.map(run => {
     const root = run.directory, home = join(root, 'home')
     const config = { runId: `child-${run.runId}`, group: run.group, replay: plan.replay, model: plan.model, pricing: plan.pricing, workspace: join(root, 'workspace'),
-      maxSteps: plan.taskBudget.maxSteps, maxCalls: plan.taskBudget.maxCalls, maxCostUSD: plan.taskBudget.maxCostUSD, tools: ['bash', 'read', 'grep'], instructionMaxBytes: 0,
+      maxSteps: plan.taskBudget.maxSteps, maxCalls: plan.taskBudget.maxCalls, maxCostUSD: plan.taskBudget.maxCostUSD, tools: ['bash', 'read', 'grep'], instructionMaxBytes: 0, maxOutputTokens: 4096,
       policyInstallationOrder: ['compression-input', 'free-context-if-enabled', 'compression-output', 'native-spill', 'observer'], plugin: run.group === 'plugin', maxInlineTokens: run.group === 'baseline-default' ? 12500 : 1200,
       sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'), runtimePackage: join(plan.runtimeRoot, 'package.json'),
       testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],

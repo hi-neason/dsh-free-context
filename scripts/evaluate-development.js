@@ -86,7 +86,7 @@ export function buildDevelopmentProfile(config) {
   const disabled = ['session-title-llm', 'llm-deepseek-account', 'llm-pi-ai', 'spill-policy', 'tool-plugin-manager', 'tool-jobs', 'tool-subagent', 'tool-subagent-fork', 'tool-subagent-control', 'tool-subagent-list-agents', 'tool-workflow', 'tool-skill']
   if (config.replay) disabled.push('llm-deepseek')
   for (const id of disabled) lines.push(`- id: ${id}`, '  disabled: true')
-  if (!config.replay) lines.push('- id: llm-deepseek', '  config:', '    apiKeyEnv: DEEPSEEK_API_KEY', '    thinking: disabled', '    reasoningEffort: off', '    maxTokens: 1024', '    streamIdleTimeoutMs: 30000')
+  if (!config.replay) lines.push('- id: llm-deepseek', '  config:', '    apiKeyEnv: DEEPSEEK_API_KEY', '    thinking: disabled', '    reasoningEffort: off', `    maxTokens: ${config.maxOutputTokens}`, '    streamIdleTimeoutMs: 30000')
   lines.push('- id: session-persistence-jsonl', '  config:', '    compression: none', `    root: ${JSON.stringify(config.sessions)}`,
     '- id: tool-bash', '  config:', '    enableRunInBackground: false', '    promoteOnTimeout: false',
     '- id: bash-sandbox', '  config:', '    timeoutMs: 5000', '    maxTimeoutMs: 5000',
@@ -117,7 +117,7 @@ export async function runDevelopmentTask(fixtureId, group, { directory, replay =
   await mkdir(profile, { recursive: true, mode: 0o700 })
   await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dependencies: {}, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'] } } }), { flag: 'wx', mode: 0o600 })
   const config = { runId: randomUUID(), group, replay, model, pricing, workspace, maxSteps, maxCalls, maxCostUSD,
-    tools: ['bash', 'read', 'grep'], instructionMaxBytes: 0, policyInstallationOrder: ['compression-input', 'free-context-if-enabled', 'compression-output', 'native-spill', 'observer'], plugin: group === 'plugin', maxInlineTokens: group === 'baseline-default' ? 12500 : 1200,
+    tools: ['bash', 'read', 'grep'], instructionMaxBytes: 0, maxOutputTokens: 4096, policyInstallationOrder: ['compression-input', 'free-context-if-enabled', 'compression-output', 'native-spill', 'observer'], plugin: group === 'plugin', maxInlineTokens: group === 'baseline-default' ? 12500 : 1200,
     sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'), runtimePackage: join(runtime, 'package.json'),
     testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
     ...(replay ? { replayProvider: fileURLToPath(new URL('./development-replay-provider.js', import.meta.url)), controlSource: fileURLToPath(new URL('../test/fixtures/development/json-output-limit/control/json-codec.js', import.meta.url)) } : {}) }

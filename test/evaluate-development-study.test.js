@@ -16,7 +16,7 @@ function recordsFor(plan, { adopted = true, pluginCounts = [10, 10, 10] } = {}) 
   return plan.runs.map(run => {
     const root = run.directory, home = join(root, 'home')
     const config = { runId: `child-${run.runId}`, group: run.group, replay: plan.replay, model: plan.model, pricing: plan.pricing, workspace: join(root, 'workspace'),
-      maxSteps: plan.taskBudget.maxSteps, maxCalls: plan.taskBudget.maxCalls, maxCostUSD: plan.taskBudget.maxCostUSD, tools: ['bash', 'read', 'grep'], instructionMaxBytes: 0,
+      maxSteps: plan.taskBudget.maxSteps, maxCalls: plan.taskBudget.maxCalls, maxCostUSD: plan.taskBudget.maxCostUSD, tools: ['bash', 'read', 'grep'], instructionMaxBytes: 0, maxOutputTokens: 4096,
       policyInstallationOrder: ['compression-input', 'free-context-if-enabled', 'compression-output', 'native-spill', 'observer'], plugin: run.group === 'plugin', maxInlineTokens: run.group === 'baseline-default' ? 12500 : 1200,
       sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'), runtimePackage: join(plan.runtimeRoot, 'package.json'),
       testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
@@ -127,7 +127,7 @@ test('adoption requires a selected final hash in durable Session and a later req
 test('source/configuration drift, cleanup failure and task quality failure cannot pass the study', () => {
   const plan = createDevelopmentStudyPlan(options)
   for (const mutate of [row => { row.sourceAfter.sourceTreeHash = 'f'.repeat(64) }, row => { row.result.cli.escalated = true },
-    row => { row.result.passed = false }, row => { row.taskPlan.configuration.maxInlineTokens = 999 }, row => { row.result.verification.testRun.passedTests = 8 }]) {
+    row => { row.result.passed = false }, row => { row.taskPlan.configuration.maxInlineTokens = 999 }, row => { row.taskPlan.configuration.maxOutputTokens = 1024 }, row => { row.result.verification.testRun.passedTests = 8 }]) {
     const rows = structuredClone(recordsFor(plan)); mutate(rows[0])
     assert.equal(summarizeDevelopmentStudy(plan, rows).accepted, false)
   }

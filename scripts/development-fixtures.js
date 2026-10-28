@@ -23,7 +23,7 @@ export async function loadDevelopmentFixture(fixtureId) {
   }
   return { id, manifestHash, manifest, files,
     testCommand: ['node', ...manifest.testCommand],
-    prompt: 'Fix the JSON rows decoder so that repeated schema keys cannot expand a small input into unbounded decoded output. Preserve existing decoding behavior for valid data, count UTF-8 bytes precisely, and support the output byte budget exercised by the test suite. Reproduce the failure with node --test test/json-codec.test.js, inspect the module, change only src/json-codec.js, and rerun all tests. Do not change tests, package metadata or dependencies. Report the change and observed test result.' }
+    prompt: 'Fix the JSON rows decoder so that repeated schema keys cannot expand a small input into unbounded decoded output. Preserve existing decoding behavior for valid data, count UTF-8 bytes precisely, and support the output byte budget exercised by the test suite. Before changing source, reproduce the failure by running exactly node --test test/json-codec.test.js without pipes or redirections; the exit status and full test output must remain observable. Then inspect the module, change only src/json-codec.js, and rerun that exact test command. Do not change tests, package metadata or dependencies. Report the change and observed test result.' }
 }
 
 export async function materializeDevelopmentFixture(fixtureId, directory) {
