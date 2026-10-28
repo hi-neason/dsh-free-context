@@ -1,8 +1,7 @@
 import { createHash } from 'node:crypto'
-import { spawn } from 'node:child_process'
 import { lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import { setTimeout as delay } from 'node:timers/promises'
+import { runEvaluationProcess } from './evaluation-process.js'
 
 const capture = new URL('../test/fixtures/development/json-output-limit/', import.meta.url)
 const manifestHash = '2451a3721d67cc2ad9bf4385ab7330c74fe2fe7635c156a14a9d115637d8cb7a'
@@ -62,46 +61,6 @@ async function workspaceHashes(root) {
   return hashes
 }
 
-async function finishProcessGroup(pid) {
-  if (!pid) return
-  try { process.kill(-pid, 'SIGKILL') } catch (error) { if (error.code === 'ESRCH') return; throw error }
-  for (let attempt = 0; attempt < 100; attempt++) {
-    try { process.kill(-pid, 0) } catch (error) { if (error.code === 'ESRCH') return; throw error }
-    await delay(10)
-  }
-  throw new Error('Verification process group cleanup unconfirmed')
-}
-
-async function runTests(root, args, timeoutMs) {
-  return new Promise(resolveResult => {
-    const child = spawn(process.execPath, args, { cwd: root, detached: true,
-      env: { PATH: dirname(process.execPath), HOME: root, LANG: 'C', TZ: 'UTC' }, stdio: ['ignore', 'pipe', 'pipe'] })
-    const chunks = []
-    let size = 0, stopReason = null
-    const stop = reason => {
-      stopReason ??= reason
-      if (child.pid) {
-        try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if (error.code !== 'ESRCH') stopReason = 'cleanup-error' }
-      }
-    }
-    const timer = setTimeout(() => stop('timeout'), timeoutMs)
-    const collect = (chunk, stdout) => {
-      size += chunk.length
-      if (size > 512 * 1024) { stop('output-limit'); return }
-      if (stdout) chunks.push(chunk)
-    }
-    child.stdout.on('data', chunk => collect(chunk, true))
-    child.stderr.on('data', chunk => collect(chunk, false))
-    child.once('error', () => { stopReason ??= 'spawn-error' })
-    child.once('close', async exitCode => {
-      clearTimeout(timer)
-      let cleaned = true
-      try { await finishProcessGroup(child.pid) } catch { cleaned = false }
-      resolveResult({ stdout: Buffer.concat(chunks).toString('utf8'), exitCode, stopReason, cleaned })
-    })
-  })
-}
-
 export async function verifyDevelopmentWorkspace(fixtureId, directory, { timeoutMs = 15000 } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000) throw new TypeError('Invalid development test timeout')
   if (process.platform === 'win32') throw new Error('Development verification requires POSIX process groups')
@@ -113,7 +72,7 @@ export async function verifyDevelopmentWorkspace(fixtureId, directory, { timeout
   const protectedFiles = paths.filter(path => !fixture.manifest.allowedEditPaths.includes(path))
   if (protectedFiles.some(path => before[path] !== fixture.manifest.files[`workspace/${path}`].sha256)) return { passed: false, reason: 'protected-files-changed' }
   const sourceChanged = before['src/json-codec.js'] !== fixture.manifest.files['workspace/src/json-codec.js'].sha256
-  const run = await runTests(root, ['--max-old-space-size=256', ...fixture.manifest.testCommand], timeoutMs)
+  const run = await runEvaluationProcess(process.execPath, ['--max-old-space-size=256', ...fixture.manifest.testCommand], { cwd: root, env: { PATH: dirname(process.execPath), HOME: root, LANG: 'C', TZ: 'UTC' }, timeoutMs })
   const { stdout, exitCode, stopReason } = run
   if (!run.cleaned) return { passed: false, reason: 'test-process-cleanup-failed' }
   let after
