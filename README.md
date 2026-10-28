@@ -718,3 +718,27 @@ console.log(result.replayComplete, result.verification.testRun)
 联合研究可提供异步 `onTaskPlan(taskPlan, slot, studyPlan)`：每个子任务计划与关联记录落盘后、CLI 启动前等待回调，用于核对父子计划和全局预算预留。回调失败会保留该次未启动任务的计划与失败记录，停止后续任务；不会补成零费用成功。
 
 研究记录保留原始账本、Session 事件、单任务结果和耗时。`summarizeDevelopmentStudy(plan, records)` 独立重算调用用量、费用、工具执行顺序与最终内容哈希链路，拒绝缺失计价、来源漂移、未确认清理或不完整的 9 项覆盖。只有全部质量和预算通过、每个插件任务有可核对的实际采用，且累计收益和配对收益中位数均为正，才报告该场景通过。采用检查要求插件边界返回更小的内容，且其哈希与最终持久化及后续模型可见内容相同；原生 spill 再次改变内容时保守排除压缩归因，这不代表任务质量失败。没有采用时，观测费用差不能归因压缩。脚本回放始终不报告货币收益；缓存与样本限制仍然适用。
+
+### V4 联合验收入口
+
+`evaluateAcceptanceBundleV4()`（`scripts/evaluate-acceptance-bundle-v4.js`）将同一源码下的校准、独立留出、运行期预测、117 次基准和 9 次历史编码任务组织为一个计划。调用前需安装官方 `0.2.1-rc.2` AgentLoop 与 CLI 两套运行时；计划同时绑定两份 lock、源码及历史任务材料哈希。
+
+```js
+import { evaluateAcceptanceBundleV4 } from './scripts/evaluate-acceptance-bundle-v4.js'
+
+const report = await evaluateAcceptanceBundleV4({
+  rootDir: '/private/tmp/dsh-acceptance-unique', // 父目录已存在，目标目录必须不存在
+  bundleId: 'local-replay-v4', replay: true,
+  agentRuntimeRoot: '/private/path/to/agent-runtime',
+  cliRuntimeRoot: '/private/path/to/cli-runtime',
+  maxTotalCostUSD: 1, maxTotalCalls: 1992,
+  knownPriorSpendUSD: 0, priorUnpricedCalls: 0, // 填写调用方实际历史账目
+})
+console.log(report.replayComplete, report.accepted, report.totalCostUSD)
+```
+
+启动 Node 时须将 `DSH_RUNTIME_ROOT` 指向同一 AgentLoop 运行时；已缓存模块不能通过中途修改环境变量切换。根目录必须位于仓库外。入口先独占创建目录并保存计划，逐任务预留完整预算、复核来源，结果写入 journal 后才等待可选的 `onResult` 回调。回调、核算或清理失败会停止后续任务，原始调用、已知费用和 CLI Session 保留；这些记录可能包含任务内容，应按本地评测资料管理。
+
+脚本回放固定执行 138 项，明确跳过真实预测校准验证，费用为 `null`，不会通过真实验收。真实模式显式使用 `replay:false`、完整 `pricing` 和 `key` 或 `credentialFile` 二选一；凭据文件在计划保存及 `onPlan` 完成后读取。最多执行 141 项：12 项校准／留出、3 项由有效训练证据决定是否运行的预测验证、117 项基准及 9 项编码任务。预算是任务边界的预留与事后核验，单请求仍可能超额；无法计价的调用保持未知。
+
+`summarizeAcceptanceBundleV4()` 独立重算原始记录，不信任子报告的通过标记。原三模式的采用、质量、累计及配对中位数收益门槛保留；独立留出仍要求退场后最多 2 次请求。历史编码任务是质量与费用对照，不强求压缩采用，但其费用纳入与基准的合计净收益。校准、预测和压力测试费用也计入整批预算，不能隐去。当前尚无该联合入口的真实模型验收通过结果，原始十四项仍未验收。
