@@ -2,7 +2,7 @@ import { containsPlaceholder, validateResponseSchema, responseSchemaIssues, phas
 import { validUsage, summarizeUsage, priceUsage, safeFailure } from './evaluation-accounting.js'
 export { summarizeUsage, priceUsage } from './evaluation-accounting.js'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -11,6 +11,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { decodeJsonRows } from '../src/json-codec.js'
 import * as plugin from '../src/index.js'
 import * as experimentsPlugin from '../src/experiments.js'
+import { createFilesystemReadClassifier } from '../src/read-source-classifier.js'
 import { loadFixtures } from './evaluate.js'
 
 const runtime = createRequire(resolve(process.env.DSH_RUNTIME_ROOT ?? '.omx/integration-runtime', 'package.json'))
@@ -94,7 +95,8 @@ export function collectAdoptions(events, modelCalls) {
   })
 }
 
-export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs, experimentalConfig, adapterFactory, maxSteps = criteria.maxSteps, configureContext, composeWithTunedNative = false, validationFeedbackLimit = 0 } = {}) {
+export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs, experimentalConfig, adapterFactory, maxSteps = criteria.maxSteps, configureContext, composeWithTunedNative = false, validationFeedbackLimit = 0, readText = false } = {}) {
+  if (typeof readText !== 'boolean') throw new TypeError('readText must be a boolean')
   if (!Number.isSafeInteger(validationFeedbackLimit) || validationFeedbackLimit < 0 || validationFeedbackLimit > 2) throw new TypeError('Validation feedback limit must be 0..2')
   if (fixture.rejectPlaceholderValues !== undefined && typeof fixture.rejectPlaceholderValues !== 'boolean') throw new TypeError('Placeholder response contract must be boolean')
   if (fixture.discoverSourcePath !== undefined && typeof fixture.discoverSourcePath !== 'boolean') throw new TypeError('Source discovery must be boolean')
@@ -102,8 +104,13 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
   for (const phase of fixture.phases ?? []) validateResponseSchema(phaseResponseSchema(fixture, phase))
   if (!groups.includes(group)) throw new TypeError('Unknown evaluation group')
   if (!replay && !key) throw new TypeError('Missing explicit credential')
-  const directory = await mkdtemp(join(tmpdir(), 'dsh-agent-eval-'))
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), 'dsh-agent-eval-'))
+  const directory = readText ? await realpath(temporaryDirectory) : temporaryDirectory
   const source = join(directory, fixture.discoverSourcePath ? `source-${randomUUID()}.txt` : 'original.txt')
+  const spillRoot = join(directory, 'spill')
+  const readClassification = readText && group === 'plugin' ? {
+    sourceRoots: [directory], artifactRoots: [spillRoot], artifactInventoryComplete: true,
+  } : undefined
   const fixtureContent = fixture.discoverSourcePath ? `${fixture.text}\n\nOriginal fixture path: ${source}` : fixture.text
   await writeFile(source, fixture.text)
   const ctx = new Context()
@@ -169,7 +176,11 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       await ctx.plugin((await load('dsh-sandbox-policy')).default, { mode: 'read-only' })
       await ctx.plugin((await load('dsh-ptc-runtime-node')).NodePtcRuntime, { timeoutMs: 15000, maxTimeoutMs: 15000 })
     }
-    await ctx.plugin(SpillLocal, { root: join(directory, 'spill'), cleanupPeriodDays: 0 })
+    // SpillLocal creates storage lazily. The classifier requires every declared
+    // root to exist even before the first save; never infer source from a miss.
+    if (readText) await mkdir(spillRoot, { mode: 0o700 })
+    await ctx.plugin(SpillLocal, { root: spillRoot, cleanupPeriodDays: 0 })
+    if (readClassification) ctx.provide('freeContextReadClassifier', createFilesystemReadClassifier(readClassification))
     await ctx.plugin(ToolFs, { read: true, readImage: false, write: fixture.edit === true, edit: fixture.edit === true, readLimit: 1000 })
     // Actual official policy composition; the base bundle declares 12500.
     const maxInlineTokens = group === 'baseline-tuned' || composeWithTunedNative && group === 'plugin' ? 1200 : 12500
@@ -187,8 +198,10 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       })
     }
     if (group === 'plugin') await ctx.plugin(plugin, historyRetirement
-      ? { mode: 'apply', tools: [], retirement: historyRetirement }
-      : { mode: 'apply', tools: [fixture.ptc ? 'run_code' : 'fixture'], minInputBytes: 0, logs: { enabled: true } })
+      ? { mode: 'apply', tools: readText ? ['read'] : [], retirement: historyRetirement,
+        ...(readText ? { readText: { enabled: true } } : {}) }
+      : { mode: 'apply', tools: [fixture.ptc ? 'run_code' : 'fixture', ...(readText ? ['read'] : [])], minInputBytes: 0, logs: { enabled: true },
+        ...(readText ? { readText: { enabled: true } } : {}) })
     if (group === 'plugin' && experimentalConfig) {
       ctx.provide('freeContextQuery', { getQuery: () => fixture.phases?.[phaseIndex]?.query ?? fixture.query })
       await ctx.plugin(experimentsPlugin, experimentalConfig)
@@ -201,8 +214,11 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       const content = decision.content ?? result.content
       const text = content.filter(block => block.type === 'text').map(block => block.text).join('\n')
       delivered = text
+      const expectedSnapshotPath = snapshotPath
       const reference = text.match(/Original tool-result snapshot: (\{[^\n]+\})/)
-      if (reference) snapshotPath = JSON.parse(reference[1]).locator
+      // Read encoding creates its own rendered-text snapshot. It must not
+      // replace the fixture/retirement snapshot required by the task protocol.
+      if (reference && ['fixture', 'run_code'].includes(exec.name)) snapshotPath = JSON.parse(reference[1]).locator
       let readWindow
       if (exec.name === 'read') {
         const requested = Object.fromEntries(['offset', 'limit'].filter(key => Number.isSafeInteger(exec.arguments[key]) && exec.arguments[key] >= 1).map(key => [key, exec.arguments[key]]))
@@ -214,7 +230,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
           contentReplaced: Object.hasOwn(decision, 'content'), valueReplaced: Object.hasOwn(decision, 'value'), byteVerified: false }
       }
       toolCalls.push({ callId: exec.callId, name: exec.name, phase: phaseIndex, bytes: Buffer.byteLength(text), isError: result.isError === true,
-        ...(exec.name === 'read' ? { readSnapshot: exec.arguments.file_path === snapshotPath, readOriginal: exec.arguments.file_path === source, readWindow } : {}) })
+        ...(exec.name === 'read' ? { readSnapshot: exec.arguments.file_path === expectedSnapshotPath, readOriginal: exec.arguments.file_path === source, readWindow } : {}) })
       return decision
     }, { prepend: true })
     ctx.tools.register(defineContentToolFixture({ name: 'fixture', description: 'Return immutable evaluation dataset.', parameters: {}, execute: async () => [{ type: 'text', text: fixtureContent }] }))
@@ -300,7 +316,9 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       ...(historyRetirement ? { historyRetirement, retirements: retirements.map(record => ({ ...record,
         ...(record.reason === 'retired' ? { actualPostRetirementSteps: steps - record.beforeStep + 1 } : {}) })) } : {}),
       decisions: decisions.map(({ strategy, outcome, reason, input, output }) => ({ strategy, outcome, reason, input, output })),
-      configuration: { maxInlineTokens, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: composeWithTunedNative, validationFeedbackLimit, maxSteps, timeoutMs },
+      configuration: { maxInlineTokens, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: composeWithTunedNative, validationFeedbackLimit, maxSteps, timeoutMs,
+        ...(readText ? { readText: { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 } } : {}) },
+      ...(readClassification ? { readClassification } : {}),
       turnEnds: events.filter(event => event.type === 'turn/end').map(event => ({ kind: event.data.reason.kind, code: event.data.reason.error?.code })),
     }
     return outcome
