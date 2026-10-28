@@ -205,6 +205,45 @@ test('query-dependent selection genuinely changes with A/B tasks and cache keys 
   assert.equal(beta.strategy, 'query-dependent-prose-selection-v1')
 })
 
+for (const promptEncoding of ['plain', 'auto']) test(`${promptEncoding} query prompts retain a complete stable source prefix and isolated A/B/A results`, async () => {
+  const text = 'Repeated sentence with exact evidence. '.repeat(100) + '\n\nAnother distinct fact.'
+  const queries = ['Alpha "中文"\nsecond line', 'Beta 😀']
+  const calls = []
+  const llm = { async * stream(request) {
+    calls.push(request)
+    const payload = JSON.parse(request.messages[0].content[0].text.split('\n').at(-1))
+    const answer = JSON.stringify({ selectedIds: [payload.currentTask === queries[0] ? 'p1' : 'p2'] })
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
+    yield { type: 'usage', usage }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  } }
+  const select = createTextSelector({ ...config(llm), promptEncoding, selectionMode: 'query-dependent', maxQueryBytes: 100, protectedTerms: [] })
+  const session = {}
+  const first = await select({ kind: 'prose', text, query: queries[0], session })
+  const second = await select({ kind: 'prose', text, query: queries[1], session })
+  const again = await select({ kind: 'prose', text, query: queries[0], session })
+  assert.deepEqual(first.selectedIds, ['p1'])
+  assert.deepEqual(second.selectedIds, ['p2'])
+  assert.deepEqual(again.selectedIds, first.selectedIds)
+  assert.notEqual(first.queryHash, second.queryHash)
+  assert.deepEqual(first.callUsage, usage)
+  assert.deepEqual(second.callUsage, usage)
+  assert.equal(again.callUsage, undefined)
+  assert.equal(again.llmCalled, false)
+  assert.equal(again.cacheHit, true)
+  assert.equal(calls.length, 2)
+  const prefixes = calls.map((request, index) => {
+    const prompt = request.messages[0].content[0].text
+    const payload = JSON.parse(prompt.split('\n').at(-1))
+    assert.equal(payload.currentTask, queries[index])
+    assert.equal(Array.isArray(payload.paragraphs), promptEncoding === 'plain')
+    const prefix = prompt.slice(0, prompt.lastIndexOf('"currentTask":'))
+    assert.ok(prefix.includes(JSON.stringify(payload.paragraphs)), 'the complete source precedes the changing query')
+    return prefix
+  })
+  assert.equal(prefixes[0], prefixes[1])
+})
+
 test('query mode rejects absent/oversized queries before calling; independent mode never forwards an incidental query', async () => {
   const llm = runtime()
   const select = createTextSelector({ ...config(llm), selectionMode: 'query-dependent', maxQueryBytes: 5 })

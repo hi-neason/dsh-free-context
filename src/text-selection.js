@@ -114,7 +114,9 @@ export function createTextSelector(options) {
       'Do not rewrite text. Retain all required IDs. Favor preserving factual evidence and qualifications; selection can still omit useful evidence.',
     ].join('\n')
     const sourceKey = diagnostic ? 'sourceBlocks' : 'paragraphs'
-    const payload = { ...(selectionMode === 'query-dependent' ? { currentTask: query } : {}), requiredIds: required, [sourceKey]: promptSpans }
+    // Keep the shared source prefix stable across questions; result caches
+    // remain keyed by the complete query hash above.
+    const payload = { requiredIds: required, [sourceKey]: promptSpans, ...(selectionMode === 'query-dependent' ? { currentTask: query } : {}) }
     const messageFor = prompt => [{ role: 'user', content: [{ type: 'text', text: prompt }] }]
     let prompt = `${instructions}\n${JSON.stringify(payload)}`
     let messages = messageFor(prompt)
