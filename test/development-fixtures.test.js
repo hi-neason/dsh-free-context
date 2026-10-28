@@ -109,7 +109,9 @@ test('external byte validation rejects output noise, exceptions, mutations and u
   for (const [name, action] of variants) await t.test(name, async t => {
     const { directory } = await workspace(t)
     await writeFile(join(directory, 'src/json-codec.js'), control + `\nif (process.argv[1]?.endsWith('development-byte-budget-validation.js')) { ${action} }\n`)
-    const result = await verifyDevelopmentWorkspace(id, directory, { timeoutMs: 1000 })
+    // Only the deliberate stall needs the short deadline. Import/error/noise
+    // cases must reach their intended failure even under parallel Node startup.
+    const result = await verifyDevelopmentWorkspace(id, directory, { timeoutMs: name === 'timeout' ? 1000 : 5000 })
     assert.equal(result.passed, false)
     if (name === 'mutation') assert.equal(result.reason, 'workspace-changed-during-verification')
     else {
