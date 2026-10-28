@@ -529,3 +529,19 @@ test('selection diagnostics identify exact selected IDs without logging source t
   await declined.handler(execution(), result(), async () => ({ kind: 'accept' }))
   assert.equal(declined.events.find(event => event.event === 'free-context/experiment').record.selectedIds, undefined)
 })
+
+test('measured trials can explicitly reject unquoted writes but never apply their unpriced output', async () => {
+  const pricing = { currency: 'USD', uncachedInputPerMillion: 1, cacheReadPerMillion: .1, outputPerMillion: 1, cacheWritePolicy: 'reject-nonzero' }
+  assert.equal(Object.hasOwn(parseExperimentConfig(settings(trialSettings({ pricing }))).pricing, 'cacheWritePerMillion'), false)
+  const { cacheWritePolicy, ...missing } = pricing
+  assert.throws(() => parseExperimentConfig(settings(trialSettings({ pricing: missing }))), /pricing/)
+  for (const cacheWritePolicy of ['ignore', 'zero', null]) {
+    assert.throws(() => parseExperimentConfig(settings(trialSettings({ pricing: { ...pricing, cacheWritePolicy } }))), /cacheWritePolicy/)
+  }
+  const f = setup(trialSettings({ pricing }), { write: true })
+  const output = await f.handler(execution(), result(), async () => ({ kind: 'accept' }))
+  assert.equal(output.content, undefined)
+  assert.equal(reports(f).at(-1).reason, 'missing-priced-usage')
+  assert.equal(reports(f).at(-1).trialBudget.sealed, true)
+  assert.equal(f.calls.length, 1)
+})

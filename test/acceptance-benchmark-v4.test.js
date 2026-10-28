@@ -519,3 +519,17 @@ test('invalid replay switches fail before checkpoints and raw-ledger defects blo
   assert.equal(result.fullAccepted, false)
   assert.ok(result.modes.every(mode => mode.accepted === false))
 })
+
+test('v4 selector pricing does not invent a zero rate for unquoted cache writes', () => {
+  const fixture = acceptanceFixturesV4().find(task => task.experiment)
+  const { cacheWrite, ...unquoted } = pricing
+  const config = experimentalConfigV4(fixture, { pricing: { ...unquoted, cacheWritePolicy: 'reject-nonzero' } })
+  assert.equal(Object.hasOwn(config.pricing, 'cacheWritePerMillion'), false)
+  assert.equal(config.pricing.cacheWritePolicy, 'reject-nonzero')
+  assert.equal(config.pricing.uncachedInputPerMillion, pricing.uncached)
+  assert.equal(config.pricing.cacheReadPerMillion, pricing.cacheRead)
+  assert.equal(config.pricing.outputPerMillion, pricing.output)
+  for (const rate of [0, .25]) {
+    assert.equal(experimentalConfigV4(fixture, { pricing: { ...unquoted, cacheWrite: rate } }).pricing.cacheWritePerMillion, rate)
+  }
+})

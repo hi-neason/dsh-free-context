@@ -40,7 +40,7 @@ export function experimentalConfigV4(fixture, { replay = false, pricing } = {}) 
   return { ...experimentSettings, tools: [...experimentSettings.tools], selectionMode: fixture.experiment,
     provider: replay ? 'replay' : 'deepseek-official', model: replay ? 'acceptance-selector-replay' : pricing?.model,
     pricing: { currency: 'USD', uncachedInputPerMillion: pricing?.uncached ?? .3, cacheReadPerMillion: pricing?.cacheRead ?? .006,
-      cacheWritePerMillion: pricing?.cacheWrite ?? 0, outputPerMillion: pricing?.output ?? 1.2 } }
+      ...(pricing?.cacheWrite === undefined ? { cacheWritePolicy: 'reject-nonzero' } : { cacheWritePerMillion: pricing.cacheWrite }), outputPerMillion: pricing?.output ?? 1.2 } }
 }
 
 function requestedProtocol(fixture, options) {

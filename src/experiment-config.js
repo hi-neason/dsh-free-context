@@ -1,7 +1,8 @@
 const budgets = ['maxInputBytes', 'maxPromptBytes', 'maxOutputBytes', 'maxOutputTokens', 'maxArtifactBytes', 'timeoutMs', 'maxParagraphs']
 const amounts = ['maxTotalCost', 'maxCallCost', 'expectedRecoveryCost', 'safetyMargin', 'futureCacheReadPerMillion']
 const keys = ['promptEncoding', 'admission', 'maxCalls', 'selectionMode', 'maxQueryBytes', 'mode', 'tools', 'provider', 'model', ...budgets, ...amounts, 'maxCacheEntries', 'maxInFlight', 'protectedTerms', 'pricing', 'minimumFutureRequests', 'minSavingsTokens', 'comparatorTokenCap']
-const priceKeys = ['currency', 'uncachedInputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion', 'outputPerMillion']
+const rateKeys = ['uncachedInputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion', 'outputPerMillion']
+const priceKeys = ['currency', ...rateKeys, 'cacheWritePolicy']
 function object(value, allowed, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError(`${label} must be an object`)
   for (const key of Reflect.ownKeys(value)) if (!allowed.includes(key)) throw new TypeError(`${label}: unknown key ${String(key)}`)
@@ -34,12 +35,14 @@ export function parseExperimentConfig(input = {}) {
   if (config.pricing !== undefined) {
     object(config.pricing, priceKeys, 'pricing')
     if (config.pricing.currency !== undefined && (typeof config.pricing.currency !== 'string' || !/^[A-Z]{3}$/.test(config.pricing.currency))) throw new TypeError('pricing.currency must be a currency code')
-    for (const key of priceKeys.slice(1)) if (config.pricing[key] !== undefined) number(config.pricing[key], `pricing.${key}`)
+    if (config.pricing.cacheWritePolicy !== undefined && config.pricing.cacheWritePolicy !== 'reject-nonzero') throw new TypeError('pricing.cacheWritePolicy is invalid')
+    for (const key of rateKeys) if (config.pricing[key] !== undefined) number(config.pricing[key], `pricing.${key}`)
     config.pricing = Object.freeze({ ...config.pricing })
   }
   if (config.admission === 'measured-trial') {
     for (const key of ['maxCalls', 'maxTotalCost', 'maxCallCost']) if (!config[key]) throw new TypeError(`${key} must be explicitly positive for measured-trial`)
-    if (config.pricing?.currency !== 'USD' || priceKeys.slice(1).some(key => config.pricing[key] === undefined)) throw new TypeError('Measured trials require complete USD auxiliary pricing')
+    if (config.pricing?.currency !== 'USD' || ['uncachedInputPerMillion', 'cacheReadPerMillion', 'outputPerMillion'].some(key => config.pricing[key] === undefined) ||
+      config.pricing.cacheWritePerMillion === undefined && config.pricing.cacheWritePolicy !== 'reject-nonzero') throw new TypeError('Measured trials require complete USD auxiliary pricing')
   }
   if (config.mode !== 'off' && config.tools.length) {
     for (const key of budgets) if (!config[key]) throw new TypeError(`${key} must be explicitly positive`)
