@@ -12,7 +12,7 @@ test('nine balanced actual CLI coding replays persist plans before execution and
   t.after(() => rm(root, { recursive: true, force: true }))
   const directory = join(root, 'study')
   let plans = 0, results = 0, taskPlans = 0
-  const report = await evaluateDevelopmentStudy({ directory, runtimeRoot, maxTotalCostUSD: .5,
+  const report = await evaluateDevelopmentStudy({ directory, runtimeRoot, readText: true, maxTotalCostUSD: .5,
     async onPlan(plan) {
       plans++
       assert.deepEqual(JSON.parse(await readFile(join(directory, 'study-plan.json'), 'utf8')), plan)
@@ -26,6 +26,8 @@ test('nine balanced actual CLI coding replays persist plans before execution and
       assert.equal(Object.isFrozen(slot), true)
       assert.equal(taskPlan.byteBudgetValidation.validatorHash, studyPlan.fixtureValidationHash)
       assert.equal(taskPlan.byteBudgetValidation.cases, 82)
+      assert.equal(studyPlan.readText, true)
+      assert.deepEqual(taskPlan.configuration.readText, { enabled: slot.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: .5 })
       const saved = (await readFile(join(directory, 'study-task-plans.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
       assert.equal(saved.length, taskPlans)
       assert.equal(saved.at(-1).taskPlan.manifestHash, taskPlan.manifestHash)

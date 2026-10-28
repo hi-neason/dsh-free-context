@@ -18,9 +18,9 @@ const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
 const hashPattern = /^[a-f0-9]{64}$/
 const withoutHash = ({ manifestHash, ...value }) => value
 
-export function createDevelopmentStudyPlan({ directory, runtimeRoot, sourceTreeHash, runtimeLockHash, fixtureManifestHash, fixtureValidationHash, fixtureInitialSourceHash, replay = true, pricing = null,
+export function createDevelopmentStudyPlan({ directory, runtimeRoot, sourceTreeHash, runtimeLockHash, fixtureManifestHash, fixtureValidationHash, fixtureInitialSourceHash, replay = true, readText = false, pricing = null,
   maxTotalCostUSD, maxTotalCalls = 144, maxSteps = 12, maxCalls = 16, maxTaskCostUSD = .05, timeoutMs = 90000 } = {}) {
-  if (!isAbsolute(directory ?? '') || !isAbsolute(runtimeRoot ?? '') || ![sourceTreeHash, runtimeLockHash, fixtureManifestHash, fixtureValidationHash, fixtureInitialSourceHash].every(value => hashPattern.test(value ?? '')) || typeof replay !== 'boolean') throw new TypeError('Explicit paths and source hashes required')
+  if (!isAbsolute(directory ?? '') || !isAbsolute(runtimeRoot ?? '') || ![sourceTreeHash, runtimeLockHash, fixtureManifestHash, fixtureValidationHash, fixtureInitialSourceHash].every(value => hashPattern.test(value ?? '')) || typeof replay !== 'boolean' || typeof readText !== 'boolean') throw new TypeError('Explicit paths and source hashes required')
   if (![maxTotalCalls, maxSteps, maxCalls, timeoutMs].every(Number.isSafeInteger) || maxTotalCalls < 1 || maxTotalCalls > 576 || maxSteps < 1 || maxSteps > 32 || maxCalls < 1 || maxCalls > 64 || timeoutMs < 1 || timeoutMs > 120000 ||
     !Number.isFinite(maxTaskCostUSD) || maxTaskCostUSD <= 0 || maxTaskCostUSD > 1 || !Number.isFinite(maxTotalCostUSD) || maxTotalCostUSD < maxTaskCostUSD || maxTotalCostUSD > 1) throw new TypeError('Explicit bounded study budgets required')
   pricing = structuredClone(pricing)
@@ -31,7 +31,7 @@ export function createDevelopmentStudyPlan({ directory, runtimeRoot, sourceTreeH
     runs.push({ runId: `${repeat}-${group}`, repeat, position, group, directory: join(directory, `run-${repeat}-${group}`) })
   }
   const plan = { version: 'development-study-v1', fixtureId: 'json-output-limit', directory, runtimeRoot, runtimeVersion: '0.2.1-rc.2', sourceTreeHash, runtimeLockHash, fixtureManifestHash, fixtureValidationHash, fixtureInitialSourceHash,
-    replay, pricing, model: replay ? 'scripted' : pricing.model, maxTotalCostUSD, maxTotalCalls,
+    replay, readText, pricing, model: replay ? 'scripted' : pricing.model, maxTotalCostUSD, maxTotalCalls,
     taskBudget: { maxSteps, maxCalls, maxCostUSD: maxTaskCostUSD, timeoutMs, shutdownGraceMs: 6000 }, runs,
     criteria: { repetitions: 3, qualityFailuresAllowed: 0, minimumNetSavingsUSD: 0, positivePairedMedianRequired: true, actualAdoptionRequired: true } }
   return freeze({ ...plan, manifestHash: digest(plan) })
@@ -52,6 +52,7 @@ function taskPlanMatches(plan, scheduled, task) {
     sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'), runtimePackage: join(plan.runtimeRoot, 'package.json'),
     testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
     ...(plan.replay ? { replayProvider: fileURLToPath(new URL('./development-replay-provider.js', import.meta.url)), controlSource: fileURLToPath(new URL('../test/fixtures/development/json-output-limit/control/json-codec.js', import.meta.url)) } : {}) }
+  if (plan.readText) expected.readText = { enabled: scheduled.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 }
   return typeof config.runId === 'string' && config.runId.length > 0 && same(config, expected) && task.fixtureId === plan.fixtureId && task.fixtureManifestHash === plan.fixtureManifestHash &&
     same(task.byteBudgetValidation, { version: BYTE_BUDGET_VALIDATION_VERSION, cases: BYTE_BUDGET_VALIDATION_CASES, validatorHash: plan.fixtureValidationHash }) &&
     task.sourceTreeHash === plan.sourceTreeHash && task.runtimeLockHash === plan.runtimeLockHash && task.runtimeVersion === plan.runtimeVersion && task.timeoutMs === plan.taskBudget.timeoutMs &&
@@ -170,7 +171,7 @@ export async function evaluateDevelopmentStudy({ directory, runtimeRoot = proces
     let result, taskPlan, sourceAfter, failure, ledgerText = null, sessionEvents = null
     const startedAt = performance.now()
     try {
-      result = await runDevelopmentTask(plan.fixtureId, scheduled.group, { ...plan.taskBudget, replay: plan.replay, key, pricing: plan.pricing, model: plan.model, directory: scheduled.directory, runtimeRoot: runtime,
+      result = await runDevelopmentTask(plan.fixtureId, scheduled.group, { ...plan.taskBudget, replay: plan.replay, readText: plan.readText, key, pricing: plan.pricing, model: plan.model, directory: scheduled.directory, runtimeRoot: runtime,
         async onPlan(task) {
           if (!taskPlanMatches(plan, scheduled, task)) throw new Error('Nested task plan mismatch')
           taskPlan = task

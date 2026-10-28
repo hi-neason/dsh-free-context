@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { runDevelopmentTask, buildDevelopmentProfile } from '../../scripts/evaluate-development.js'
@@ -136,5 +136,51 @@ test('final observer hashes match compression, downstream native spill, durable 
     assert.equal(hash(persisted.data.message.content), tool.contentHash)
     if (maxInlineTokens === 1200 && !suppressCandidate) assert.equal(JSON.parse(persisted.data.message.content[0].text).format, 'dsh-json-rows')
     else assert.ok((await readdir(config.spill, { recursive: true })).length > 0)
+  }
+})
+
+test('actual CLI source read packing is opt-in and preserves final Session/model visibility while excluding artifacts', { skip: process.platform === 'win32', timeout: 90000 }, async t => {
+  const { decodeLosslessText } = await import('../../src/lossless-text.js')
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'dsh-cli-read-packing-')))
+  t.after(() => rm(base, { recursive: true, force: true }))
+  const source = ('Repeated diagnostic preamble with exact spaces and punctuation. '.repeat(5) + '\n').repeat(70) + 'UNIQUE_READ_FACT 中文😀\n'
+  let original
+  for (const [label, enabled, plugin, artifact] of [['off', false, true, false], ['source', true, true, false], ['baseline', false, false, false], ['artifact', true, true, true]]) {
+    const root = join(base, label), home = join(root, 'home'), spill = join(root, 'spill')
+    await mkdir(join(home, 'profiles/headless'), { recursive: true })
+    await mkdir(spill, { mode: 0o700 })
+    const readFixture = artifact ? 'spill/source.txt' : 'source.txt'
+    await writeFile(join(root, readFixture), source)
+    await writeFile(join(home, 'profiles/headless/package.json'), JSON.stringify({ private: true, dependencies: {}, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'] } } }))
+    const config = { replay: true, model: 'scripted', plugin, tools: ['read'], maxInlineTokens: 12500, workspace: root, sessions: join(home, 'sessions'), spill, ledger: join(root, 'ledger.jsonl'), readFixture,
+      ...(label !== 'off' ? { readText: { enabled, classifier: 'filesystem-host-v1', minimumSavingsRatio: .5 } } : {}),
+      replayProvider: fileURLToPath(new URL('../fixtures/development-transform-provider.js', import.meta.url)), maxSteps: 4, maxCalls: 4, maxCostUSD: 1, runtimePackage: join(runtimeRoot, 'package.json'), testCommands: [], manifestHash: `synthetic-read-${label}` }
+    await writeFile(config.ledger, '')
+    const observer = join(root, 'observer.json'), patch = join(root, 'patch.yml')
+    await writeFile(observer, JSON.stringify(config)); await writeFile(patch, buildDevelopmentProfile(config))
+    const child = await runEvaluationProcess(process.execPath, [join(runtimeRoot, 'node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'headless', '--patch', patch, '--json', 'Read the source file, then acknowledge its output.'], { cwd: root, timeoutMs: 30000,
+      env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root, DSH_HOME: home, DSH_AGENTS_HOME: join(root, 'agents'), DSH_TELEMETRY_DISABLED: '1', DSH_DEVELOPMENT_CONFIG: observer, DSH_CLI_RUNTIME_PACKAGE: join(runtimeRoot, 'package.json') } })
+    assert.equal(child.exitCode, 0, child.stderr)
+    assert.equal(child.cleaned, true)
+    const ledger = (await readFile(config.ledger, 'utf8')).trim().split('\n').map(JSON.parse)
+    const tool = ledger.find(row => row.type === 'tool' && row.name === 'read')
+    assert.equal(tool.isError, false)
+    const input = ledger.find(row => row.type === 'compression/input' && row.callId === tool.callId)
+    const output = ledger.find(row => row.type === 'compression/output' && row.callId === tool.callId)
+    const files = (await readdir(config.sessions, { recursive: true })).filter(path => path.endsWith('.jsonl'))
+    const rows = (await Promise.all(files.map(path => readFile(join(config.sessions, path), 'utf8')))).flatMap(text => text.trim().split('\n').map(JSON.parse))
+    const saved = rows.find(row => row.type === 'tool/result' && row.data.message.toolCallId === tool.callId).data.message.content
+    assert.equal(hash(saved), output.contentHash)
+    assert.equal(output.contentHash, tool.contentHash)
+    assert.equal(tool.valueHash, tool.finalValueHash)
+    assert.ok(ledger.some(row => row.type === 'model/start' && row.visibleToolResults.some(value => value.callId === tool.callId && value.contentHash === output.contentHash)))
+    const selected = ledger.some(row => row.type === 'decision' && row.outcome === 'selected' && row.strategy === 'read-lossless-text-v1')
+    assert.equal(selected, label === 'source', JSON.stringify({ label, stderr: child.stderr, decisions: ledger.filter(row => row.type === 'decision'), bytes: input.bytes, prefix: saved[0].text.slice(0, 120) }))
+    if (label === 'off') original = saved[0].text
+    if (label === 'source') {
+      assert.ok(output.bytes * 2 <= input.bytes)
+      assert.equal(decodeLosslessText(saved[0].text.split('\n\nOriginal tool-result snapshot: ')[0]), original.replace(join(base, 'off/source.txt'), join(base, 'source/source.txt')))
+    } else assert.equal(input.contentHash, output.contentHash)
+    assert.ok(rows.some(row => row.type === 'turn/end' && row.data.reason.kind === 'completed'))
   }
 })

@@ -21,6 +21,7 @@ function recordsFor(plan, { adopted = true, pluginCounts = [10, 10, 10] } = {}) 
       sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'), runtimePackage: join(plan.runtimeRoot, 'package.json'),
       testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
       ...(plan.replay ? { replayProvider: join(repository, 'scripts/development-replay-provider.js'), controlSource: join(repository, 'test/fixtures/development/json-output-limit/control/json-codec.js') } : {}) }
+    if (plan.readText) config.readText = { enabled: run.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 }
     const task = { version: 'development-task-v1', fixtureId: plan.fixtureId, fixtureManifestHash: plan.fixtureManifestHash, byteBudgetValidation: { version: 'json-output-utf8-v1', cases: 82, validatorHash: plan.fixtureValidationHash }, configuration: config, timeoutMs: plan.taskBudget.timeoutMs,
       shutdownGraceMs: 6000, runtimeVersion: plan.runtimeVersion, runtimeLockHash: plan.runtimeLockHash, sourceTreeHash: plan.sourceTreeHash, patchHash: hash(buildDevelopmentProfile(config)) }
     const taskPlan = { ...task, manifestHash: digest(task) }
@@ -222,4 +223,26 @@ test('independent byte-budget evidence rejects forged success flags and binds va
   const rows = recordsFor(plan)
   delete rows[0].sourceAfter.fixtureValidationHash
   assert.equal(summarizeDevelopmentStudy(plan, rows).configurationComplete, false)
+})
+
+
+test('read packing is explicit, frozen, group-specific and independently matched', () => {
+  const off = createDevelopmentStudyPlan(options)
+  assert.equal(off.readText, false)
+  assert.equal(Object.hasOwn(recordsFor(off)[0].taskPlan.configuration, 'readText'), false)
+  assert.throws(() => createDevelopmentStudyPlan({ ...options, readText: 'true' }), TypeError)
+  const plan = createDevelopmentStudyPlan({ ...options, readText: true })
+  const rows = recordsFor(plan)
+  assert.equal(summarizeDevelopmentStudy(plan, rows).accepted, true)
+  for (const row of rows) assert.deepEqual(row.taskPlan.configuration.readText,
+    { enabled: row.result.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 })
+  for (const change of [null, { enabled: true }, { classifier: 'untrusted' }, { minimumSavingsRatio: 0 }]) {
+    const changed = recordsFor(plan), task = changed[0].taskPlan
+    if (change === null) delete task.configuration.readText
+    else Object.assign(task.configuration.readText, change)
+    task.patchHash = hash(buildDevelopmentProfile(task.configuration))
+    const { manifestHash, ...body } = task
+    task.manifestHash = digest(body)
+    assert.equal(summarizeDevelopmentStudy(plan, changed).configurationComplete, false)
+  }
 })

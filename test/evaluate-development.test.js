@@ -80,3 +80,8 @@ test('malformed nested visibility metadata rejects completeness while retaining 
     assert.equal(malformed.visibleToolResults, visibleToolResults)
   }
 })
+
+
+test('development read packing option requires an explicit boolean', async () => {
+  await assert.rejects(runDevelopmentTask('json-output-limit', 'plugin', { directory: '/tmp/not-created-development-read', readText: 'true' }), TypeError)
+})
