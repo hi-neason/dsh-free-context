@@ -460,3 +460,16 @@ test('missing or failed Agent cleanup rejects acceptance without discarding know
     }
   }
 })
+
+test('unquoted cache writes require explicit rejection policy, never a fabricated zero rate', () => {
+  const { cacheWrite, ...unquoted } = pricing
+  assert.throws(() => createAcceptanceBundlePlanV4({ ...inputs, pricing: unquoted }), /pricing/i)
+  const explicit = { ...unquoted, cacheWritePolicy: 'reject-nonzero' }
+  const plan = createAcceptanceBundlePlanV4({ ...inputs, pricing: explicit })
+  assert.deepEqual(plan.inputs.pricing, explicit)
+  assert.deepEqual(plan.developmentPlan.pricing, explicit)
+  assert.equal(Object.hasOwn(plan.inputs.pricing, 'cacheWrite'), false)
+  for (const cacheWritePolicy of ['zero', 'ignore', null]) {
+    assert.throws(() => createAcceptanceBundlePlanV4({ ...inputs, pricing: { ...unquoted, cacheWritePolicy } }), /pricing/i)
+  }
+})

@@ -38,6 +38,14 @@ export function price(usage, pricing) {
   return Number.isFinite(value) ? value : null
 }
 
+/** Prospective studies may explicitly refuse unquoted cache writes. This does
+ * not provide a write rate or change accounting for observed usage. */
+export function validEvaluationPricing(pricing) {
+  return price({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, pricing) !== null &&
+    (Number.isFinite(pricing.cacheWrite) && pricing.cacheWrite >= 0 ||
+      pricing.cacheWrite === undefined && pricing.cacheWritePolicy === 'reject-nonzero')
+}
+
 export function validProvenance(provenance, pricing) {
   return Boolean(provenance?.runtimeVersion === '0.2.1-rc.2' && /^[a-f0-9]{40}$/.test(provenance?.repositoryCommit ?? '') && /^[a-f0-9]{64}$/.test(provenance?.sourceTreeHash ?? '') && provenance?.model === pricing?.model && provenance?.cacheCondition === acceptanceCriteria.cacheCondition)
 }

@@ -176,3 +176,25 @@ test('live studies cannot begin without explicit credentials or with relative di
   await assert.rejects(evaluateDevelopmentStudy({ directory: 'relative' }), TypeError)
   for (const callback of ['onPlan', 'onTaskPlan', 'onResult']) await assert.rejects(evaluateDevelopmentStudy({ directory: '/tmp/not-created-invalid-study-callback', [callback]: true }), TypeError)
 })
+
+test('development plans accept unquoted writes only with an explicit reject-nonzero policy', () => {
+  const { cacheWrite, ...unquoted } = prices
+  assert.throws(() => createDevelopmentStudyPlan({ ...options, pricing: unquoted }), /pricing/i)
+  const pricing = { ...unquoted, cacheWritePolicy: 'reject-nonzero' }
+  const plan = createDevelopmentStudyPlan({ ...options, pricing })
+  assert.deepEqual(plan.pricing, pricing)
+  assert.equal(Object.hasOwn(plan.pricing, 'cacheWrite'), false)
+  const rows = recordsFor(plan)
+  const original = summarizeDevelopmentStudy(plan, rows)
+  assert.equal(original.accepted, true) // fabricated validator transcripts only
+  const row = rows[0], events = row.ledgerText.split('\n').map(JSON.parse)
+  events.find(event => event.type === 'model/end').usage.cacheWriteTokens = 1
+  row.ledgerText = events.map(JSON.stringify).join('\n')
+  Object.assign(row.result, reconcileDevelopmentLedger(events, { replay: false, pricing, model: plan.model, manifestHash: row.taskPlan.manifestHash }))
+  const unpriced = summarizeDevelopmentStudy(plan, rows)
+  assert.equal(unpriced.accepted, false)
+  assert.equal(unpriced.costComplete, false)
+  assert.ok(unpriced.knownPricedUsageUSD > 0)
+  assert.ok(unpriced.knownPricedUsageUSD < original.knownPricedUsageUSD)
+  assert.throws(() => createDevelopmentStudyPlan({ ...options, pricing: { ...unquoted, cacheWritePolicy: 'ignore' } }), /pricing/i)
+})

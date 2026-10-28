@@ -8,7 +8,7 @@ import { retirementDiscoveryFixtureV4, retirementDiscoveryPolicyV4 } from '../te
 import { calibrateRetirementReports, inspectRetirementReport, retirementEvidenceHash as hash } from './calibrate-retirement.js'
 import { phaseResponseSchema, responseSchemaIssues } from './evaluation-contract.js'
 import { summarizeUsage, priceUsage } from './evaluation-accounting.js'
-import { price, validProvenance } from './acceptance-benchmark.js'
+import { validEvaluationPricing, validProvenance } from './acceptance-benchmark.js'
 import { assessNetBenefit } from '../src/economics.js'
 
 const groups = ['baseline-default', 'baseline-tuned', 'plugin']
@@ -37,7 +37,7 @@ export function createAcceptanceBundlePlanV4({ rootDir, bundleId, seed = 2026102
   if (!Number.isFinite(maxTotalCostUSD) || maxTotalCostUSD < .05 || maxTotalCostUSD > 1 || !Number.isSafeInteger(maxTotalCalls) || maxTotalCalls < 1 || maxTotalCalls > 1992 ||
       !Number.isFinite(knownPriorSpendUSD) || knownPriorSpendUSD < 0 || !Number.isSafeInteger(priorUnpricedCalls) || priorUnpricedCalls < 0) throw new TypeError('Explicit bounded budget and prior spend required')
   if (!validProvenance(provenance, pricing ?? { model: provenance?.model }) || typeof provenance?.model !== 'string' || !provenance.model.trim()) throw new TypeError('Complete provenance required')
-  if (pricing !== null && price({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 1 }, pricing) === null || !replay && pricing === null) throw new TypeError('Complete pricing required')
+  if (pricing !== null && !validEvaluationPricing(pricing) || !replay && pricing === null) throw new TypeError('Complete pricing required')
   if (!runtimes || !same(Object.keys(runtimes).sort(), ['agent', 'cli']) || Object.values(runtimes).some(runtime => !runtime || !same(Object.keys(runtime).sort(), ['lockHash', 'root', 'version']) ||
       !isAbsolute(runtime.root ?? '') || resolve(runtime.root) !== runtime.root || !digest.test(runtime.lockHash ?? '') || runtime.version !== '0.2.1-rc.2')) throw new TypeError('Both pinned rc.2 runtime identities required')
   if (provenance.runtimeLockHash !== runtimes.agent.lockHash) throw new TypeError('Agent provenance lock must match pinned runtime')

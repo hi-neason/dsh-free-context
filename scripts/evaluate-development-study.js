@@ -6,7 +6,7 @@ import { acceptanceSourceHash } from './acceptance-benchmark-cli.js'
 import { loadDevelopmentFixture } from './development-fixtures.js'
 import { buildDevelopmentProfile, inspectDevelopmentWorkflow, parseDevelopmentLedger, readDevelopmentSessionRecords, reconcileDevelopmentLedger, runDevelopmentTask } from './evaluate-development.js'
 import { safeFailure } from './evaluation-accounting.js'
-import { price } from './acceptance-benchmark.js'
+import { validEvaluationPricing } from './acceptance-benchmark.js'
 
 const repository = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '')
 const hash = value => createHash('sha256').update(value).digest('hex')
@@ -23,7 +23,7 @@ export function createDevelopmentStudyPlan({ directory, runtimeRoot, sourceTreeH
   if (![maxTotalCalls, maxSteps, maxCalls, timeoutMs].every(Number.isSafeInteger) || maxTotalCalls < 1 || maxTotalCalls > 576 || maxSteps < 1 || maxSteps > 32 || maxCalls < 1 || maxCalls > 64 || timeoutMs < 1 || timeoutMs > 120000 ||
     !Number.isFinite(maxTaskCostUSD) || maxTaskCostUSD <= 0 || maxTaskCostUSD > 1 || !Number.isFinite(maxTotalCostUSD) || maxTotalCostUSD < maxTaskCostUSD || maxTotalCostUSD > 1) throw new TypeError('Explicit bounded study budgets required')
   pricing = structuredClone(pricing)
-  if (!replay && (typeof pricing?.model !== 'string' || !pricing.model.trim() || price({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 1 }, pricing) === null)) throw new TypeError('Complete model pricing required')
+  if (!replay && (typeof pricing?.model !== 'string' || !pricing.model.trim() || !validEvaluationPricing(pricing))) throw new TypeError('Complete model pricing required')
   const runs = []
   for (let repeat = 0; repeat < 3; repeat++) for (let position = 0; position < 3; position++) {
     const group = groups[(position + repeat) % 3]
