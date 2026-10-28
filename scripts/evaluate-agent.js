@@ -120,6 +120,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
   let phaseIndex = 0
   let steps = 0
   let stoppedReason
+  let outcome
   let snapshotPath
   let delivered = ''
   const startedAt = new Date().toISOString()
@@ -265,7 +266,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     })
     const passed = responseSchemaSatisfied && responseContractSatisfied && exactFacts && requiredTools && snapshotRecovered && !failedTurn && !stoppedReason && attempts.length === 0 && steps <= maxSteps
     const fileCorrect = !fixture.edit || await readFile(source, 'utf8') === fixture.editedText
-    return { task: fixture.id, group, replay, passed: passed && fileCorrect, fileCorrect, exactFacts, requiredTools, snapshotRecoveryRequired, snapshotRecovered, actual, finalAnswer: text ?? null, startedAt, steps,
+    outcome = { task: fixture.id, group, replay, passed: passed && fileCorrect, fileCorrect, exactFacts, requiredTools, snapshotRecoveryRequired, snapshotRecovered, actual, finalAnswer: text ?? null, startedAt, steps,
       drafts, feedback, correctionCount: feedback.length, responseContractSatisfied, responseSchemaSatisfied, attempts: attempts.length, usageComplete, modelCalls, phaseResults, experiments, snapshotRecoveryByPhase,
       adoptions: collectAdoptions(events, modelCalls),
       recoveryCalls: toolCalls.filter(call => call.readSnapshot).length,
@@ -278,15 +279,30 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       configuration: { maxInlineTokens, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: composeWithTunedNative, validationFeedbackLimit, maxSteps, timeoutMs },
       turnEnds: events.filter(event => event.type === 'turn/end').map(event => ({ kind: event.data.reason.kind, code: event.data.reason.error?.code })),
     }
+    return outcome
   } catch (error) {
     const { usage } = summarizeUsage(modelCalls.map(call => call.complete ? call.usage : undefined))
-    return { task: fixture.id, group, replay, passed: false, exactFacts: false, requiredTools: false, fileCorrect: false, snapshotRecovered: false,
+    outcome = { task: fixture.id, group, replay, passed: false, exactFacts: false, requiredTools: false, fileCorrect: false, snapshotRecovered: false,
       failure: safeFailure(error), stoppedReason: 'runner-exception', usageComplete: false, usage, modelCalls, phaseResults, drafts, feedback, correctionCount: feedback.length, toolCalls, experiments, retirements,
       usageKind: replay ? 'synthetic-replay' : 'provider-reported', estimatedCostUSD: null, pricing: prices ?? null, steps, startedAt, elapsedMs: performance.now() - started }
+    return outcome
   } finally {
     clearTimeout(timer)
-    await ctx.fiber.dispose()
-    await rm(directory, { recursive: true, force: true })
+    const failures = []
+    try { await ctx.fiber.dispose() } catch (error) { failures.push({ phase: 'context-dispose', failure: safeFailure(error) }) }
+    try { await rm(directory, { recursive: true, force: true }) } catch (error) { failures.push({ phase: 'directory-cleanup', failure: safeFailure(error) }) }
+    if (outcome) {
+      const refreshed = summarizeUsage(modelCalls.map(call => call.usage))
+      outcome.usage = refreshed.usage
+      outcome.usageComplete = !outcome.failure && failures.length === 0 && refreshed.complete && modelCalls.every(call => call.complete)
+      outcome.estimatedCostUSD = replay || !outcome.usageComplete ? null : priceUsage(outcome.usage, prices)
+      outcome.cleanup = { complete: failures.length === 0, failures }
+      outcome.elapsedMs = performance.now() - started
+      if (failures.length) {
+        outcome.passed = false
+        outcome.stoppedReason ??= 'cleanup-failed'
+      }
+    }
   }
 }
 
