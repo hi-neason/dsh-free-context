@@ -84,7 +84,7 @@ function inspectRecord(plan, scheduled, record) {
   // A selected candidate can still fail final validation. Require a smaller,
   // changed return at the plugin boundary and its exact hash all the way to a
   // later model request. Native spill of that return is conservatively excluded.
-  const adopted = configured && parsed.events.some((event, index) => {
+  const adopted = configured && accounting.usageComplete && parsed.events.some((event, index) => {
     if (event.type !== 'compression/output' || !hashPattern.test(event.contentHash ?? '') || !Number.isSafeInteger(event.bytes) || event.bytes < 0) return false
     const inputs = parsed.events.slice(0, index).map((row, i) => ({ row, i })).filter(({ row }) => row.type === 'compression/input' && row.callId === event.callId)
     if (inputs.length !== 1) return false

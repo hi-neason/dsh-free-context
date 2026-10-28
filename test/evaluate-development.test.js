@@ -67,3 +67,16 @@ test('ambiguous duplicated starts cannot count the same provider usage twice', (
   assert.equal(result.modelEnds.length, 1)
   assert.equal(result.modelEnds[0].usage.inputTokens, 10)
 })
+
+test('malformed nested visibility metadata rejects completeness while retaining known billed usage', () => {
+  for (const visibleToolResults of [[null], [undefined], [42], [{}], { callId: 'not-an-array' }]) {
+    const malformed = { ...start, visibleToolResults }
+    const result = reconcileDevelopmentLedger([malformed, end], binding)
+    assert.equal(result.usageComplete, false)
+    assert.equal(result.costComplete, false)
+    assert.equal(result.knownPricedUsageUSD, .00002)
+    assert.equal(result.usage.inputTokens, 10)
+    assert.deepEqual(result.modelCalls[0].visibleToolResults, [])
+    assert.equal(malformed.visibleToolResults, visibleToolResults)
+  }
+})

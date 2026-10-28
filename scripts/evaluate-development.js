@@ -14,6 +14,7 @@ const contentHash = value => hash(JSON.stringify(value) ?? 'undefined')
 const freeze = value => { if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.values(value).forEach(freeze); Object.freeze(value) } return value }
 const groups = ['baseline-default', 'baseline-tuned', 'plugin']
 const parseLines = text => text.trim() ? text.trim().split('\n').map(line => JSON.parse(line)) : []
+const visibleResult = value => value !== null && typeof value === 'object' && typeof value.callId === 'string' && value.callId.length > 0 && /^[a-f0-9]{64}$/.test(value.contentHash)
 
 export function parseDevelopmentLedger(text) {
   const events = [], errors = []
@@ -36,8 +37,11 @@ export function reconcileDevelopmentLedger(events, { replay, pricing, model, man
     const matches = ends.filter(end => end.id === start.id)
     const uniqueStart = Number.isSafeInteger(start.id) && start.id > 0 && starts.filter(other => other.id === start.id).length === 1
     const end = uniqueStart && matches.length === 1 ? matches[0] : undefined
-    return { ...start, usage: end?.usage ?? null, finish: end?.finish ?? null,
-      complete: start.id === index + 1 && Number.isSafeInteger(start.agentStep) && start.agentStep >= 0 && Array.isArray(start.visibleToolResults) && start.visibleToolResults.every(result => typeof result.callId === 'string' && /^[a-f0-9]{64}$/.test(result.contentHash)) && matches.length === 1 && end?.complete === true && validUsage(end?.usage) && ['stop', 'tool-calls'].includes(end?.finish) }
+    const visibilityComplete = Array.isArray(start.visibleToolResults) && start.visibleToolResults.every(visibleResult)
+    // Keep usable counters even if metadata is damaged. The derived visibility
+    // view contains safe entries; the original journal remains the raw evidence.
+    return { ...start, visibleToolResults: Array.isArray(start.visibleToolResults) ? start.visibleToolResults.filter(visibleResult) : [], usage: end?.usage ?? null, finish: end?.finish ?? null,
+      complete: start.id === index + 1 && Number.isSafeInteger(start.agentStep) && start.agentStep >= 0 && visibilityComplete && matches.length === 1 && end?.complete === true && validUsage(end?.usage) && ['stop', 'tool-calls'].includes(end?.finish) }
   })
   const usage = summarizeUsage(modelCalls.map(call => call.usage))
   const route = call => call.provider === (replay ? 'development-replay' : 'deepseek-official') && call.model === model

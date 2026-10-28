@@ -93,6 +93,20 @@ test('raw billing journal defeats summary tampering and preserves known costs on
   assert.ok(summarizeDevelopmentStudy(plan, failed).knownPricedUsageUSD > 0)
 })
 
+test('nested malformed visibility in a valid JSON journal fails without losing known task charges', () => {
+  const plan = createDevelopmentStudyPlan(options)
+  const rows = recordsFor(plan)
+  const known = summarizeDevelopmentStudy(plan, rows).knownPricedUsageUSD
+  const events = rows[0].ledgerText.split('\n').map(JSON.parse)
+  events.find(event => event.type === 'model/start').visibleToolResults = [null]
+  rows[0].ledgerText = events.map(JSON.stringify).join('\n')
+  const result = summarizeDevelopmentStudy(plan, rows)
+  assert.equal(result.accepted, false)
+  assert.equal(result.accountingComplete, false)
+  assert.equal(result.costComplete, false)
+  assert.equal(result.knownPricedUsageUSD, known)
+})
+
 test('adoption requires a selected final hash in durable Session and a later request', () => {
   const plan = createDevelopmentStudyPlan(options)
   for (const mutate of [
