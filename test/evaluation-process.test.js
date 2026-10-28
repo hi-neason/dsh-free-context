@@ -4,7 +4,7 @@ import { runEvaluationProcess } from '../scripts/evaluation-process.js'
 
 test('evaluation subprocess budgets and environment reject before execution', { skip: process.platform === 'win32' }, async () => {
   const options = { cwd: process.cwd(), env: {}, timeoutMs: 1000 }
-  for (const change of [{ cwd: 'relative' }, { env: undefined }, { env: { KEY: 42 } }, { timeoutMs: 0 }, { maxOutputBytes: Infinity }]) {
+  for (const change of [{ cwd: 'relative' }, { env: undefined }, { env: { KEY: 42 } }, { timeoutMs: 0 }, { maxOutputBytes: Infinity }, { shutdownGraceMs: -1 }, { shutdownGraceMs: 10001 }, { shutdownGraceMs: .5 }]) {
     await assert.rejects(runEvaluationProcess(process.execPath, ['-e', 'process.exit(0)'], { ...options, ...change }), TypeError)
   }
 })
@@ -36,4 +36,15 @@ test('cleanup requires group disappearance even when a racing signal reports EPE
       assert.equal(result.cleaned, confirmGone)
     } finally { process.kill = original }
   }
+})
+
+test('cooperative owners get a bounded graceful shutdown before escalation', { skip: process.platform === 'win32' }, async () => {
+  const cooperative = await runEvaluationProcess(process.execPath, ['-e', "process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),30));setInterval(()=>{},1000)"], { cwd: process.cwd(), env: {}, timeoutMs: 150, shutdownGraceMs: 300 })
+  assert.equal(cooperative.stopReason, 'timeout')
+  assert.equal(cooperative.gracefulStop, true)
+  assert.equal(cooperative.escalated, false)
+  assert.equal(cooperative.cleaned, true)
+  const stubborn = await runEvaluationProcess(process.execPath, ['-e', "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { cwd: process.cwd(), env: {}, timeoutMs: 150, shutdownGraceMs: 150 })
+  assert.equal(stubborn.escalated, true)
+  assert.equal(stubborn.stopReason, 'timeout')
 })

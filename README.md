@@ -665,3 +665,31 @@ DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:acceptance -- --version 3 \
 `materializeDevelopmentFixture(id, newDirectory)` 只向新目录复制旧模块、固定的 9 项测试、原 package 元数据及许可证；历史参考修复不进入 Agent 工作区。`verifyDevelopmentWorkspace(id, directory)` 在 POSIX 平台独立启动 Node 24 测试进程组，超时或输出超限时终止并确认清理该组，再核对受保护文件及执行前后哈希，拒绝修改测试/package、符号链接或额外文件，并要求源码实际改变且 9 项测试全通过。离线控制确认旧源码 8/9 通过、历史修复 9/9 通过。
 
 这仅是可重复的真实缺陷任务材料和验证器；尚未完成模型驱动的 CLI 修复任务对照，也不提供 token 或费用收益证明。它将作为独立开发任务扩展，不能替代原固定验收矩阵中失败的任务。
+
+### 真实 CLI 编码任务入口
+
+源码接口 `runDevelopmentTask()` 会启动官方 rc.2 headless CLI 子进程，使用独立目录、编码所需的 bash、文件读写与检索工具及公开插件配置。任务目录必须新建且位于本仓库外，并通过公开配置关闭 Agent 指令发现，避免继承本项目或其他祖先仓库的附加指令；文件和记录保留供调用方审计、清理。
+
+```js
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { runDevelopmentTask } from './scripts/evaluate-development.js'
+
+const root = await mkdtemp(join(tmpdir(), 'dsh-development-'))
+const result = await runDevelopmentTask('json-output-limit', 'plugin', {
+  directory: join(root, 'run'), replay: true,
+  runtimeRoot: '/private/path/to/official-cli-runtime',
+})
+console.log(result.replayComplete, result.verification.testRun)
+```
+
+三组分别为 `baseline-default`、`baseline-tuned`、`plugin`，原生上限为 12500/1200/1200。它们使用相同的编码工具、禁止后台任务和子 Agent 的任务配置；插件组通过公开加载顺序叠加插件。审计器先就绪，CLI 才能启动任务；它只观察模型和工具结果，不改写历史。验证包含初次测试失败、修改源码后的重跑成功、外部固定测试通过、结构化值保持一致，以及实际 Session 文件中工具结果与模型输入哈希的对应情况。
+
+遇到全局超时或输出超限，入口先向 CLI 发送 `SIGTERM`，最多等待 6 秒，让 dsh 终止并等待其独立管理的工具进程。超过期限再强制终止 CLI 进程组；这种情况不能确认工具清理。只有 CLI 进程组消失、未发生强杀兜底，且退出记录确认没有进行中的工具调用，才运行外部验证。真实 CLI 回归检查执行中的 bash 在中断后进程消失且不再延迟写入，包括工具忽略 `SIGTERM` 的情况；中断任务仍判为失败。
+
+默认是脚本回放：已知历史修复仅供回放适配器使用，不复制到任务工作区。三组回放各完成 5 次合成模型调用、真实工具读写和外部 9/9 测试；这不是模型自行修复的证据，合成用量不会计为费用。步数上限和计划保存失败的测试也会保留明确失败。
+
+真实模式必须显式提供 `replay: false`、`key`、完整 `pricing` 及异步 `onPlan`/`onResult` 回调。计划在模型进程启动前保存；所有模型请求的开始、结束和用量独立核对，缺失用量阻止后续请求，不能按零费用补齐。账本逐行核对；损坏或截断会令完整性检查失败，但可核实的调用和用量小计仍保留。`passed` 表示任务质量，`withinBudget` 是单任务预算检查；请求间检查仍可能超额，两者都不是净收益验收。入口保留原始记录，并区分完整费用估算与可计价用量小计。`transformations` 只关联选中策略与下游处理后的最终结果，不证明裁剪后的内容完整。转换路径另有实际 CLI 回归，覆盖 JSON 压缩及随后原生 spill 的最终结果、Session 与模型输入哈希一致。
+
+目前仅通过无付费 CLI 回放，尚未执行该编码任务的真实模型三组对照。单任务结果也不能替代原 117 次矩阵或原始十四项联合验收。
