@@ -67,6 +67,19 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
         return { content: replacement, strategy: 'json-rows-v1', lossy: false }
       }
     }
+    if (exec.name !== 'read' && config.text.enabled) {
+      const encoded = encodeLosslessText(block.text, { maxInputBytes: config.maxInputBytes, maxOutputBytes: config.maxInputBytes })
+      if (encoded !== undefined) {
+        const replacement = [{ ...block, text: encoded }]
+        const output = measureContent(replacement, estimator)
+        // The complete frame is self-contained. Require a substantial saving
+        // before replacing readable text; do not create a recovery snapshot.
+        if (smaller(replacement) && output.bytes * 2 <= input.bytes &&
+            output.estimatedTokens * 2 <= input.estimatedTokens) {
+          return { content: replacement, strategy: 'tool-lossless-text-v1', lossy: false }
+        }
+      }
+    }
     if (!config.logs.enabled) return undefined
     const draft = reduceNodeTap(block.text)
     if (!draft || !smaller([{ ...block, text: draft.text }])) return undefined

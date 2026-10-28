@@ -29,6 +29,7 @@ const fiber = await ctx.plugin(FreeContext, {
   minSavingsTokens: 32,
   json: { enabled: true },
   logs: { enabled: false },
+  text: { enabled: false },
 })
 ```
 
@@ -41,6 +42,7 @@ const fiber = await ctx.plugin(FreeContext, {
 | `minSavingsTokens` | `32` | 候选策略要求的最小估算 token 节省量 |
 | `json.enabled` | `true` | JSON 策略开关 |
 | `logs.enabled` | `false` | 有损日志策略开关，默认关闭 |
+| `text.enabled` | `false` | 对允许列表中的非 `read` 工具结果尝试自包含无损文本编码 |
 | `readText.enabled` | `false` | 对明确属于源文件的 `read` 文本尝试可逆编码；需要宿主分类服务及原文存储 |
 | `readText.encodeArtifacts` | `false` | 配合 `readText.enabled`，对宿主确认的 artifact 读取输出自包含可逆 frame，不创建新快照 |
 | `retirement.enabled` | `false` | 历史结果退场；具有独立工具允许列表和经济门槛，见下文 |
@@ -48,6 +50,12 @@ const fiber = await ctx.plugin(FreeContext, {
 字节和 token 数必须为非负安全整数；未知键、错误类型和无效配置会在加载时明确报错，即使 `mode` 为 `off` 也要通过校验。配置经过复制和递归冻结，不受调用方后续修改影响。即时策略与历史退场全部关闭时不注册监听器。
 
 JSON 路由只接收单个纯文本内容块：通过工具允许列表与完整内容块体积检查后，编码适用的对象数组，解码并比较 JSON 数据，然后要求完整候选字节数和估算 token 均严格减少，且估算差值达到 `minSavingsTokens`。输入预算包含 JSON 转义与块元数据，正文单独低于上限不足以通过检查。已有编码 envelope、未知格式、非规范 JSON、多块或媒体内容保留原文。JSON 路由不丢弃字段；打开 `logs.enabled` 后可进一步匹配下文限定的 Node TAP 日志。
+
+### 可选普通工具文本编码
+
+设置 `text: { enabled: true }` 并将工具名加入 `tools` 后，JSON 路由未命中的单文本结果会在日志精简之前尝试 `tool-lossless-text-v1`。例如 `{ mode: 'apply', tools: ['bash'], text: { enabled: true } }` 可以处理重复较多的命令输出。完整候选的序列化字节数与估算 token 均须至少减少 50%，同时满足 `minSavingsTokens`；短文本、缺少重复或节省不足时继续原有路由。
+
+编码包含该次工具呈现文本的完整字典、文字片段、UTF-8 字节数和 SHA-256，采用前校验精确往返，不调用模型或创建快照。内容块元数据与程序消费的 `value` 保持原样；工具错误、PTC 内部调用和结构化值替换仍跳过，PTC 最终输出可以按允许列表处理。`read` 始终排除在本开关外，读取编码继续使用独立的 `readText` 分类规则。`observe` 只报告候选、不改变模型输入。文本可还原不等于模型任务质量或完整任务 token 收益已通过验证；该选项默认关闭。
 
 ### 可选读取文本编码
 
