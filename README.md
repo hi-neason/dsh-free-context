@@ -658,6 +658,8 @@ DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:acceptance -- --version 3 \
 
 评测 fixture 或单独 phase 还可声明可选 `responseSchema`，用于约束答案格式。例如文件内容任务可显式要求 `version`、`retryLimit` 为整数并禁止额外包装字段。支持的类型为 object、array、string、number、integer、boolean、null；关键字子集为 `type`、对象 `properties`/`required`/`additionalProperties` 和数组 `items`，不支持 `const`、`enum`、`$ref` 等关键字；非法、递归或过大的 schema 在模型调用前拒绝。反馈只包含声明的路径、类型和格式问题，不提供标准答案值。三组沿用同一纠正上限，额外调用仍计费；汇总器独立重算格式约束，精确事实验收保持单独执行。未声明时保持旧行为，既有冻结任务和结果不追溯更改。这只能检查格式，不能证明字段事实正确或诊断完整。
 
+`type` 也可用非空、无重复的类型列表，如 `['string', 'null']`；最多包含上述七种类型。联合节点仅允许 `type`，不同时接受对象或数组的结构关键字。混合 JSON 数组可用 `items: {type: ['boolean', 'number', 'string', 'object', 'null']}` 声明元素类型范围，不规定元素数量、顺序或值；容器内部未声明的结构仍由独立事实验收检查。
+
 ### 历史缺陷编码任务材料
 
 `development-fixtures.js` 提供 `json-output-limit`，来自本仓库真实修复：旧源码提交 `916fe21`，修复及完整回归测试提交 `bbedaa5`。问题是重复 schema 字段可使不足 25 KB 的编码输入展开约 20 MB；任务要求修复输出字节预算，并保留正常解码及 UTF-8 边界行为。

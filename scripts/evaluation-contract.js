@@ -14,12 +14,16 @@ const schemaTypes = ['object', 'array', 'string', 'number', 'integer', 'boolean'
 const plain = value => value !== null && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value))
 
 // Deliberately small JSON Schema subset. No constants, enums or answer facts.
+// Type unions are leaves: they allow alternatives without declaring a tuple's
+// positions, length or values. Structural keywords require one concrete type.
 export function validateResponseSchema(schema) {
   if (schema === undefined) return
   const active = new Set()
   let nodes = 0
   function visit(node, depth) {
-    if (!plain(node) || !schemaTypes.includes(node.type) || active.has(node) || depth > 12 || ++nodes > 128) throw new TypeError('Invalid or excessive response schema')
+    if (!plain(node) || active.has(node) || depth > 12 || ++nodes > 128) throw new TypeError('Invalid or excessive response schema')
+    const union = Array.isArray(node.type)
+    if (union ? node.type.length < 1 || node.type.length > schemaTypes.length || [...node.type].some(type => !schemaTypes.includes(type)) || new Set(node.type).size !== node.type.length : !schemaTypes.includes(node.type)) throw new TypeError('Invalid response schema type')
     const allowed = node.type === 'object' ? ['type', 'properties', 'required', 'additionalProperties'] : node.type === 'array' ? ['type', 'items'] : ['type']
     if (Reflect.ownKeys(node).some(key => !allowed.includes(key))) throw new TypeError('Unsupported response schema keyword')
     active.add(node)
@@ -46,8 +50,9 @@ export function responseSchemaIssues(value, schema) {
   function inspect(actual, node, path) {
     if (issues.length >= 8) return
     if (++visited > 4096) { issues.push(`${path}: response exceeds validation budget`); return }
-    const valid = node.type === 'object' ? plain(actual) : node.type === 'array' ? Array.isArray(actual) : node.type === 'null' ? actual === null : node.type === 'integer' ? Number.isInteger(actual) : node.type === 'number' ? typeof actual === 'number' && Number.isFinite(actual) : typeof actual === node.type
-    if (!valid) { issues.push(`${path}: expected ${node.type}`); return }
+    const types = Array.isArray(node.type) ? node.type : [node.type]
+    const valid = types.some(type => type === 'object' ? plain(actual) : type === 'array' ? Array.isArray(actual) : type === 'null' ? actual === null : type === 'integer' ? Number.isInteger(actual) : type === 'number' ? typeof actual === 'number' && Number.isFinite(actual) : typeof actual === type)
+    if (!valid) { issues.push(`${path}: expected ${types.join(' or ')}`); return }
     if (node.type === 'object') {
       // Report declared paths only; do not echo arbitrary response keys/values.
       for (const key of node.required ?? []) if (!Object.hasOwn(actual, key) && issues.length < 8) issues.push(`${path}[${JSON.stringify(key)}]: required property missing`)

@@ -60,3 +60,32 @@ test('declared scalar/null roots parse without corrections while malformed JSON 
     assert.equal(result.phaseResults[0].responseText, text)
   }
 })
+
+test('heterogeneous response types preserve precision and null while exact facts remain a separate gate', async () => {
+  const fixture = { ...acceptanceFixtures().find(task => task.id === 'json-nested-precision'), responseSchema: {
+    type: 'object', properties: { decimal: { type: 'string' }, integer: { type: 'string' }, missing: { type: 'null' },
+      variants: { type: 'array', items: { type: ['boolean', 'number', 'string', 'object', 'null'] } } },
+    required: ['decimal', 'integer', 'missing', 'variants'], additionalProperties: false,
+  } }
+  for (const changeFacts of [false, true]) {
+    const adapterFactory = options => {
+      const adapter = acceptanceReplayAdapter(options), stream = adapter.stream.bind(adapter)
+      adapter.stream = async function* (request) {
+        for await (const chunk of stream(request)) {
+          if (changeFacts && chunk.type === 'block-end' && chunk.block.type === 'text') {
+            const answer = JSON.parse(chunk.block.text)
+            answer.variants = [true, 99, 'changed', { unrelated: null }]
+            yield { ...chunk, block: { ...chunk.block, text: JSON.stringify(answer) } }
+          } else yield chunk
+        }
+      }
+      return adapter
+    }
+    const result = await runAgentFixture(fixture, 'baseline-default', { replay: true, adapterFactory, validationFeedbackLimit: 2 })
+    assert.equal(result.responseSchemaSatisfied, true)
+    assert.equal(result.passed, !changeFacts)
+    assert.equal(result.correctionCount, 0)
+    assert.equal(result.phaseResults[0].actual.missing, null)
+    assert.equal(result.phaseResults[0].actual.decimal, fixture.expected.decimal)
+  }
+})

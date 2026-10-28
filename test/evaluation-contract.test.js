@@ -33,3 +33,20 @@ test('unsupported, cyclic and unbounded response schemas fail before use', async
   for (let i = 0; i < 40; i++) deep = { type: 'array', items: deep }
   assert.throws(() => validateResponseSchema(deep), TypeError)
 })
+
+test('bounded type unions describe heterogeneous JSON without embedding answer values', async () => {
+  const { validateResponseSchema, responseSchemaIssues } = await import('../scripts/evaluation-contract.js')
+  const schema = { type: 'array', items: { type: ['boolean', 'number', 'string', 'object', 'null'] } }
+  assert.doesNotThrow(() => validateResponseSchema(schema))
+  assert.deepEqual(responseSchemaIssues([false, 0, '0', { nested: [1, null] }, null], schema), [])
+  assert.deepEqual(responseSchemaIssues([true, 17.25, 'arbitrary value', { other: 'shape is unconstrained' }], schema), [])
+  assert.ok(responseSchemaIssues([[]], schema).length)
+  assert.ok(responseSchemaIssues([Infinity], schema).length)
+  assert.deepEqual(responseSchemaIssues(null, { type: ['string', 'null'] }), [])
+  assert.deepEqual(responseSchemaIssues('arbitrary', { type: ['string', 'null'] }), [])
+  assert.ok(responseSchemaIssues(5, { type: ['string', 'null'] }).length)
+  for (const invalid of [[], ['unknown'], ['string', 'string'], ['string', null], new Array(1), ['number', 'number', 'number', 'number', 'number', 'number', 'number', 'number']]) {
+    assert.throws(() => validateResponseSchema({ type: invalid }), TypeError)
+  }
+  for (const keyword of ['properties', 'items', 'required', 'enum', 'const']) assert.throws(() => validateResponseSchema({ type: ['object', 'array'], [keyword]: {} }), TypeError)
+})
