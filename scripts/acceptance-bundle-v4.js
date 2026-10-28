@@ -42,7 +42,7 @@ export function createAcceptanceBundlePlanV4({ rootDir, bundleId, seed = 2026102
   if (!runtimes || !same(Object.keys(runtimes).sort(), ['agent', 'cli']) || Object.values(runtimes).some(runtime => !runtime || !same(Object.keys(runtime).sort(), ['lockHash', 'root', 'version']) ||
       !isAbsolute(runtime.root ?? '') || resolve(runtime.root) !== runtime.root || !digest.test(runtime.lockHash ?? '') || runtime.version !== '0.2.1-rc.2')) throw new TypeError('Both pinned rc.2 runtime identities required')
   if (provenance.runtimeLockHash !== runtimes.agent.lockHash) throw new TypeError('Agent provenance lock must match pinned runtime')
-  if (!developmentIdentity || !same(Object.keys(developmentIdentity).sort(), ['fixtureInitialSourceHash', 'fixtureManifestHash']) || !Object.values(developmentIdentity).every(value => digest.test(value))) throw new TypeError('Historical development fixture identities required')
+  if (!developmentIdentity || !same(Object.keys(developmentIdentity).sort(), ['fixtureInitialSourceHash', 'fixtureManifestHash', 'fixtureValidationHash']) || !Object.values(developmentIdentity).every(value => digest.test(value))) throw new TypeError('Historical development fixture identities required')
   const inputs = copy({ rootDir, bundleId, seed, replay, provenance, pricing, maxTotalCostUSD, maxTotalCalls, knownPriorSpendUSD, priorUnpricedCalls, runtimes, developmentIdentity, ...(maxTaskCostUSD === undefined ? {} : { maxTaskCostUSD }) })
   const taskAgentBudget = maxTaskCostUSD === undefined ? agentBudget : { ...agentBudget, maxCostUSD: maxTaskCostUSD }
   const taskDevelopmentBudget = maxTaskCostUSD === undefined ? developmentBudget : { ...developmentBudget, maxCostUSD: maxTaskCostUSD }

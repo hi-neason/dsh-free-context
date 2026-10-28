@@ -122,7 +122,7 @@ export async function runDevelopmentTask(fixtureId, group, { directory, replay =
     testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
     ...(replay ? { replayProvider: fileURLToPath(new URL('./development-replay-provider.js', import.meta.url)), controlSource: fileURLToPath(new URL('../test/fixtures/development/json-output-limit/control/json-codec.js', import.meta.url)) } : {}) }
   const patch = buildDevelopmentProfile(config)
-  const plan = { version: 'development-task-v1', fixtureId, fixtureManifestHash: fixture.manifestHash, configuration: config, timeoutMs, shutdownGraceMs: 6000,
+  const plan = { version: 'development-task-v1', fixtureId, fixtureManifestHash: fixture.manifestHash, byteBudgetValidation: fixture.byteBudgetValidation, configuration: config, timeoutMs, shutdownGraceMs: 6000,
     runtimeVersion: version, runtimeLockHash: hash(await readFile(join(runtime, 'package-lock.json'))), sourceTreeHash: await acceptanceSourceHash(repository), patchHash: hash(patch) }
   plan.manifestHash = contentHash(plan)
   freeze(plan)
@@ -163,7 +163,8 @@ export async function runDevelopmentTask(fixtureId, group, { directory, replay =
   const turns = persisted.filter(event => event.type === 'turn/end')
   const steps = persisted.filter(event => event.type === 'step/start').length
   const stepsRecorded = steps > 0 && steps <= maxSteps && accounting.modelCalls.filter(call => call.kind === 'agent').length >= steps
-  const passed = execution.exitCode === 0 && execution.stopReason === null && toolCleanupConfirmed && cli.at(-1)?.type === 'final' && verification.passed && workflowOrdered && reproduced && retested && persistenceComplete && structuredValuesPreserved && stepsRecorded && turns.length > 0 && turns.every(event => event.data.reason.kind === 'completed')
+  const validationIdentityMatches = verification.byteBudgetValidation?.validatorHash === plan.byteBudgetValidation.validatorHash
+  const passed = validationIdentityMatches && execution.exitCode === 0 && execution.stopReason === null && toolCleanupConfirmed && cli.at(-1)?.type === 'final' && verification.passed && workflowOrdered && reproduced && retested && persistenceComplete && structuredValuesPreserved && stepsRecorded && turns.length > 0 && turns.every(event => event.data.reason.kind === 'completed')
   const result = freeze({ task: fixtureId, group, replay, plan, passed, verification, reproduced, retested, workflowOrdered, persistenceComplete, structuredValuesPreserved, stepsRecorded,
     usageKind: replay ? 'synthetic-replay' : 'provider-reported', ...accounting, steps, tools: tools.map(tool => ({ ...tool, modelVisible: accounting.modelCalls.some(call => call.visibleToolResults?.some(value => value.callId === tool.callId && value.contentHash === tool.contentHash)) })),
     auditErrors, decisions: events.filter(event => event.type === 'decision'), limits: events.filter(event => event.type === 'limit'),

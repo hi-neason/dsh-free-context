@@ -3,6 +3,7 @@ import { appendFile, mkdir, readFile, realpath, writeFile } from 'node:fs/promis
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { acceptanceSourceHash } from './acceptance-benchmark-cli.js'
+import { BYTE_BUDGET_VALIDATION_CASES, BYTE_BUDGET_VALIDATION_VERSION } from './development-byte-budget-validation.js'
 import { loadDevelopmentFixture } from './development-fixtures.js'
 import { buildDevelopmentProfile, inspectDevelopmentWorkflow, parseDevelopmentLedger, readDevelopmentSessionRecords, reconcileDevelopmentLedger, runDevelopmentTask } from './evaluate-development.js'
 import { safeFailure } from './evaluation-accounting.js'
@@ -17,9 +18,9 @@ const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
 const hashPattern = /^[a-f0-9]{64}$/
 const withoutHash = ({ manifestHash, ...value }) => value
 
-export function createDevelopmentStudyPlan({ directory, runtimeRoot, sourceTreeHash, runtimeLockHash, fixtureManifestHash, fixtureInitialSourceHash, replay = true, pricing = null,
+export function createDevelopmentStudyPlan({ directory, runtimeRoot, sourceTreeHash, runtimeLockHash, fixtureManifestHash, fixtureValidationHash, fixtureInitialSourceHash, replay = true, pricing = null,
   maxTotalCostUSD, maxTotalCalls = 144, maxSteps = 12, maxCalls = 16, maxTaskCostUSD = .05, timeoutMs = 90000 } = {}) {
-  if (!isAbsolute(directory ?? '') || !isAbsolute(runtimeRoot ?? '') || ![sourceTreeHash, runtimeLockHash, fixtureManifestHash, fixtureInitialSourceHash].every(value => hashPattern.test(value ?? '')) || typeof replay !== 'boolean') throw new TypeError('Explicit paths and source hashes required')
+  if (!isAbsolute(directory ?? '') || !isAbsolute(runtimeRoot ?? '') || ![sourceTreeHash, runtimeLockHash, fixtureManifestHash, fixtureValidationHash, fixtureInitialSourceHash].every(value => hashPattern.test(value ?? '')) || typeof replay !== 'boolean') throw new TypeError('Explicit paths and source hashes required')
   if (![maxTotalCalls, maxSteps, maxCalls, timeoutMs].every(Number.isSafeInteger) || maxTotalCalls < 1 || maxTotalCalls > 576 || maxSteps < 1 || maxSteps > 32 || maxCalls < 1 || maxCalls > 64 || timeoutMs < 1 || timeoutMs > 120000 ||
     !Number.isFinite(maxTaskCostUSD) || maxTaskCostUSD <= 0 || maxTaskCostUSD > 1 || !Number.isFinite(maxTotalCostUSD) || maxTotalCostUSD < maxTaskCostUSD || maxTotalCostUSD > 1) throw new TypeError('Explicit bounded study budgets required')
   pricing = structuredClone(pricing)
@@ -29,7 +30,7 @@ export function createDevelopmentStudyPlan({ directory, runtimeRoot, sourceTreeH
     const group = groups[(position + repeat) % 3]
     runs.push({ runId: `${repeat}-${group}`, repeat, position, group, directory: join(directory, `run-${repeat}-${group}`) })
   }
-  const plan = { version: 'development-study-v1', fixtureId: 'json-output-limit', directory, runtimeRoot, runtimeVersion: '0.2.1-rc.2', sourceTreeHash, runtimeLockHash, fixtureManifestHash, fixtureInitialSourceHash,
+  const plan = { version: 'development-study-v1', fixtureId: 'json-output-limit', directory, runtimeRoot, runtimeVersion: '0.2.1-rc.2', sourceTreeHash, runtimeLockHash, fixtureManifestHash, fixtureValidationHash, fixtureInitialSourceHash,
     replay, pricing, model: replay ? 'scripted' : pricing.model, maxTotalCostUSD, maxTotalCalls,
     taskBudget: { maxSteps, maxCalls, maxCostUSD: maxTaskCostUSD, timeoutMs, shutdownGraceMs: 6000 }, runs,
     criteria: { repetitions: 3, qualityFailuresAllowed: 0, minimumNetSavingsUSD: 0, positivePairedMedianRequired: true, actualAdoptionRequired: true } }
@@ -52,6 +53,7 @@ function taskPlanMatches(plan, scheduled, task) {
     testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
     ...(plan.replay ? { replayProvider: fileURLToPath(new URL('./development-replay-provider.js', import.meta.url)), controlSource: fileURLToPath(new URL('../test/fixtures/development/json-output-limit/control/json-codec.js', import.meta.url)) } : {}) }
   return typeof config.runId === 'string' && config.runId.length > 0 && same(config, expected) && task.fixtureId === plan.fixtureId && task.fixtureManifestHash === plan.fixtureManifestHash &&
+    same(task.byteBudgetValidation, { version: BYTE_BUDGET_VALIDATION_VERSION, cases: BYTE_BUDGET_VALIDATION_CASES, validatorHash: plan.fixtureValidationHash }) &&
     task.sourceTreeHash === plan.sourceTreeHash && task.runtimeLockHash === plan.runtimeLockHash && task.runtimeVersion === plan.runtimeVersion && task.timeoutMs === plan.taskBudget.timeoutMs &&
     task.shutdownGraceMs === plan.taskBudget.shutdownGraceMs && task.patchHash === hash(buildDevelopmentProfile(expected))
 }
@@ -76,7 +78,12 @@ function inspectRecord(plan, scheduled, record) {
   const stepCoverage = steps > 0 && agents.length >= steps && agents.every(call => call.agentStep >= 1 && call.agentStep <= steps) &&
     Array.from({ length: steps }, (_, i) => i + 1).every(step => agents.some(call => call.agentStep === step))
   const verified = result?.verification
-  const quality = configured && cleanup && result.passed === true && verified?.passed === true && verified.sourceChanged === true && verified.protectedFilesIntact === true && hashPattern.test(verified.sourceHash ?? '') &&
+  const byteValidation = verified?.byteBudgetValidation
+  const byteVerified = byteValidation?.version === BYTE_BUDGET_VALIDATION_VERSION && byteValidation.cases === BYTE_BUDGET_VALIDATION_CASES &&
+    byteValidation.passedCases === BYTE_BUDGET_VALIDATION_CASES && byteValidation.failedCases === 0 && byteValidation.exitCode === 0 &&
+    byteValidation.stopReason === null && byteValidation.cleaned === true && byteValidation.sourceHash === verified.sourceHash &&
+    byteValidation.validatorHash === plan.fixtureValidationHash && hashPattern.test(byteValidation.outputHash ?? '')
+  const quality = byteVerified && configured && cleanup && result.passed === true && verified?.passed === true && verified.sourceChanged === true && verified.protectedFilesIntact === true && hashPattern.test(verified.sourceHash ?? '') &&
     verified.testRun?.tests === 9 && verified.testRun.passedTests === 9 && verified.testRun.failedTests === 0 && verified.testRun.exitCode === 0 && verified.testRun.stopReason === null &&
     workflow.workflowOrdered && persisted && tools.every(tool => hashPattern.test(tool.valueHash ?? '') && tool.valueHash === tool.finalValueHash) &&
     turns.length > 0 && turns.every(row => row.data?.reason?.kind === 'completed') && stepCoverage && steps <= plan.taskBudget.maxSteps && result.steps === steps &&
@@ -95,7 +102,7 @@ function inspectRecord(plan, scheduled, record) {
         sessions.some(saved => saved.type === 'tool/result' && saved.data?.message?.toolCallId === event.callId && digest(saved.data.message.content) === event.contentHash) &&
         parsed.events.slice(index + offset + 2).some(request => request.type === 'model/start' && request.visibleToolResults?.some(tool => tool.callId === event.callId && tool.contentHash === event.contentHash)))
   })
-  const sourceAfterMatches = same(record.sourceAfter, { sourceTreeHash: plan.sourceTreeHash, runtimeLockHash: plan.runtimeLockHash, fixtureManifestHash: plan.fixtureManifestHash, runtimeVersion: plan.runtimeVersion })
+  const sourceAfterMatches = same(record.sourceAfter, { sourceTreeHash: plan.sourceTreeHash, runtimeLockHash: plan.runtimeLockHash, fixtureManifestHash: plan.fixtureManifestHash, fixtureValidationHash: plan.fixtureValidationHash, runtimeVersion: plan.runtimeVersion })
   return { runId: scheduled.runId, group: scheduled.group, repeat: scheduled.repeat, configured, sourceAfterMatches, accountingMatches, quality, adopted,
     elapsedMs: Number.isFinite(record.elapsedMs) && record.elapsedMs >= 0 ? record.elapsedMs : null, steps: result?.steps ?? null, ...accounting }
 }
@@ -146,7 +153,7 @@ export async function evaluateDevelopmentStudy({ directory, runtimeRoot = proces
   const version = JSON.parse(await readFile(join(runtime, 'node_modules/@deepseek-ai/dsh/package.json'), 'utf8')).version
   if (version !== '0.2.1-rc.2') throw new Error('Unsupported official CLI runtime')
   const fixture = await loadDevelopmentFixture('json-output-limit')
-  const plan = createDevelopmentStudyPlan({ ...options, directory: root, runtimeRoot: runtime, fixtureManifestHash: fixture.manifestHash, fixtureInitialSourceHash: fixture.manifest.files['workspace/src/json-codec.js'].sha256,
+  const plan = createDevelopmentStudyPlan({ ...options, directory: root, runtimeRoot: runtime, fixtureManifestHash: fixture.manifestHash, fixtureValidationHash: fixture.byteBudgetValidation.validatorHash, fixtureInitialSourceHash: fixture.manifest.files['workspace/src/json-codec.js'].sha256,
     sourceTreeHash: await acceptanceSourceHash(repository), runtimeLockHash: hash(await readFile(join(runtime, 'package-lock.json'))) })
   await mkdir(root, { mode: 0o700 })
   await writeFile(join(root, 'study-plan.json'), JSON.stringify(plan, null, 2), { flag: 'wx', mode: 0o600 })
@@ -158,7 +165,7 @@ export async function evaluateDevelopmentStudy({ directory, runtimeRoot = proces
   for (const scheduled of plan.runs) {
     if (calls + plan.taskBudget.maxCalls > plan.maxTotalCalls || !plan.replay && spent + plan.taskBudget.maxCostUSD > plan.maxTotalCostUSD) { stoppedReason = 'budget-reservation'; break }
     try {
-      if (await acceptanceSourceHash(repository) !== plan.sourceTreeHash || hash(await readFile(join(runtime, 'package-lock.json'))) !== plan.runtimeLockHash) { stoppedReason = 'source-or-runtime-drift'; break }
+      if (await acceptanceSourceHash(repository) !== plan.sourceTreeHash || hash(await readFile(join(runtime, 'package-lock.json'))) !== plan.runtimeLockHash || (await loadDevelopmentFixture(plan.fixtureId)).byteBudgetValidation.validatorHash !== plan.fixtureValidationHash) { stoppedReason = 'source-or-runtime-drift'; break }
     } catch { stoppedReason = 'source-or-runtime-drift'; break }
     let result, taskPlan, sourceAfter, failure, ledgerText = null, sessionEvents = null
     const startedAt = performance.now()
@@ -179,6 +186,7 @@ export async function evaluateDevelopmentStudy({ directory, runtimeRoot = proces
     try {
       sourceAfter = { sourceTreeHash: await acceptanceSourceHash(repository), runtimeLockHash: hash(await readFile(join(runtime, 'package-lock.json'))),
         fixtureManifestHash: (await loadDevelopmentFixture(plan.fixtureId)).manifestHash,
+        fixtureValidationHash: (await loadDevelopmentFixture(plan.fixtureId)).byteBudgetValidation.validatorHash,
         runtimeVersion: JSON.parse(await readFile(join(runtime, 'node_modules/@deepseek-ai/dsh/package.json'), 'utf8')).version }
     } catch {}
     const record = freeze({ runId: scheduled.runId, manifestHash: plan.manifestHash, taskPlan: taskPlan ?? null, result: result ?? null, ledgerText, sessionEvents, sourceAfter: sourceAfter ?? null,

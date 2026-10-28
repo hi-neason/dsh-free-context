@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto'
 import { lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { BYTE_BUDGET_VALIDATION_CASES, BYTE_BUDGET_VALIDATION_VERSION } from './development-byte-budget-validation.js'
 import { runEvaluationProcess } from './evaluation-process.js'
 
+const byteValidator = new URL('./development-byte-budget-validation.js', import.meta.url)
 const capture = new URL('../test/fixtures/development/json-output-limit/', import.meta.url)
 const manifestHash = '2451a3721d67cc2ad9bf4385ab7330c74fe2fe7635c156a14a9d115637d8cb7a'
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
@@ -22,8 +25,10 @@ export async function loadDevelopmentFixture(fixtureId) {
     if (name.startsWith('workspace/')) files[name.slice('workspace/'.length)] = content.toString('utf8')
   }
   return { id, manifestHash, manifest, files,
+    byteBudgetValidation: { version: BYTE_BUDGET_VALIDATION_VERSION, cases: BYTE_BUDGET_VALIDATION_CASES,
+      validatorHash: digest(await readFile(byteValidator)) },
     testCommand: ['node', ...manifest.testCommand],
-    prompt: 'Fix the JSON rows decoder so that repeated schema keys cannot expand a small input into unbounded decoded output. Preserve existing decoding behavior for valid data, count UTF-8 bytes precisely, and support the output byte budget exercised by the test suite. Before changing source, reproduce the failure by running exactly node --test test/json-codec.test.js without pipes or redirections; the exit status and full test output must remain observable. Then inspect the module, change only src/json-codec.js, and rerun that exact test command. Do not change tests, package metadata or dependencies. Report the change and observed test result.' }
+    prompt: 'Fix the JSON rows decoder so that repeated schema keys cannot expand a small input into unbounded decoded output. Preserve existing decoding behavior for valid data, count UTF-8 bytes precisely including JSON escaping and repeated keys, accept exact-fit output budgets, and support the output byte budget exercised by the test suite. Before changing source, reproduce the failure by running exactly node --test test/json-codec.test.js without pipes or redirections; the exit status and full test output must remain observable. Then inspect the module, change only src/json-codec.js, and rerun that exact test command. Do not change tests, package metadata or dependencies. Report the change and observed test result.' }
 }
 
 export async function materializeDevelopmentFixture(fixtureId, directory) {
@@ -67,6 +72,10 @@ export async function verifyDevelopmentWorkspace(fixtureId, directory, { timeout
   if (Number(process.versions.node.split('.')[0]) < 24) throw new Error('Node 24 or later is required')
   const fixture = await loadDevelopmentFixture(fixtureId)
   const root = resolve(directory)
+  const { validatorHash } = fixture.byteBudgetValidation
+  const validatorUnchanged = async () => {
+    try { return digest(await readFile(byteValidator)) === validatorHash } catch { return false }
+  }
   let before
   try { before = await workspaceHashes(root) } catch { return { passed: false, reason: 'invalid-workspace' } }
   const protectedFiles = paths.filter(path => !fixture.manifest.allowedEditPaths.includes(path))
@@ -78,10 +87,35 @@ export async function verifyDevelopmentWorkspace(fixtureId, directory, { timeout
   let after
   try { after = await workspaceHashes(root) } catch { return { passed: false, reason: 'workspace-changed-during-verification' } }
   if (paths.some(path => after[path] !== before[path])) return { passed: false, reason: 'workspace-changed-during-verification' }
+  if (!await validatorUnchanged()) return { passed: false, reason: 'validator-changed-during-verification' }
+  const byteRun = stopReason === null ? await runEvaluationProcess(process.execPath,
+    ['--max-old-space-size=256', fileURLToPath(byteValidator), join(root, 'src/json-codec.js')],
+    { cwd: root, env: { PATH: dirname(process.execPath), HOME: root, LANG: 'C', TZ: 'UTC' }, timeoutMs, maxOutputBytes: 16384 }) : null
+  let byteResult = null
+  try { byteResult = JSON.parse(byteRun?.stdout) } catch { /* Missing or extra output fails closed. */ }
+  const expectedResult = { version: BYTE_BUDGET_VALIDATION_VERSION, cases: BYTE_BUDGET_VALIDATION_CASES,
+    passedCases: byteResult?.passedCases, failedCases: byteResult?.failedCases }
+  const validResult = byteRun?.stdout === `${JSON.stringify(expectedResult)}\n` &&
+    Number.isSafeInteger(byteResult?.passedCases) && byteResult.passedCases >= 0 &&
+    Number.isSafeInteger(byteResult?.failedCases) && byteResult.failedCases >= 0 &&
+    byteResult.passedCases + byteResult.failedCases === BYTE_BUDGET_VALIDATION_CASES
+  const byteBudgetValidation = { version: BYTE_BUDGET_VALIDATION_VERSION, cases: BYTE_BUDGET_VALIDATION_CASES,
+    passedCases: validResult ? byteResult.passedCases : null, failedCases: validResult ? byteResult.failedCases : null,
+    exitCode: byteRun?.exitCode ?? null, stopReason: byteRun?.stopReason ?? (byteRun ? null : 'historical-test-stopped'),
+    cleaned: byteRun?.cleaned ?? false, outputHash: digest(JSON.stringify([byteRun?.stdout ?? '', byteRun?.stderr ?? ''])),
+    validatorHash, sourceHash: before['src/json-codec.js'],
+    passed: Boolean(validResult && byteRun.cleaned && byteRun.stopReason === null && byteRun.exitCode === 0 &&
+      byteRun.stderr === '' && byteResult.failedCases === 0) }
+  if (byteRun && !byteRun.cleaned) return { passed: false, reason: 'test-process-cleanup-failed', byteBudgetValidation }
+  try { after = await workspaceHashes(root) } catch { return { passed: false, reason: 'workspace-changed-during-verification', byteBudgetValidation } }
+  if (!await validatorUnchanged()) return { passed: false, reason: 'validator-changed-during-verification', byteBudgetValidation }
+  if (paths.some(path => after[path] !== before[path])) {
+    return { passed: false, reason: 'workspace-changed-during-verification', byteBudgetValidation }
+  }
   const count = name => { const match = stdout.match(new RegExp(`^# ${name} ([0-9]+)$`, 'm')); return match ? Number(match[1]) : null }
   const tests = count('tests'), passedTests = count('pass'), failedTests = count('fail')
-  return { passed: sourceChanged && stopReason === null && exitCode === 0 && tests === fixture.manifest.expectedTests && passedTests === tests && failedTests === 0,
-    sourceChanged, protectedFilesIntact: true, sourceHash: after['src/json-codec.js'],
+  return { passed: byteBudgetValidation.passed && sourceChanged && stopReason === null && exitCode === 0 && tests === fixture.manifest.expectedTests && passedTests === tests && failedTests === 0,
+    byteBudgetValidation, sourceChanged, protectedFilesIntact: true, sourceHash: after['src/json-codec.js'],
     testRun: { exitCode, timedOut: stopReason === 'timeout', stopReason, tests, passedTests, failedTests, outputHash: digest(stdout) },
-    claimBoundary: 'Fixed historical regression tests in an external Node process; no model quality, cost savings or universal correctness claim.' }
+    claimBoundary: 'Fixed historical regression tests and independent UTF-8 boundary cases in external Node processes; no model quality, cost savings or universal correctness claim.' }
 }

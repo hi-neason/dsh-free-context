@@ -10,7 +10,7 @@ const repository = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const digest = value => hash(JSON.stringify(value))
 const prices = { currency: 'USD', model: 'model', sourceUrl: 'https://example.test/pricing', verifiedDate: '2026-10-28', ratePeriod: 'test', uncached: 1, cacheRead: .1, cacheWrite: 0, output: 2 }
-const options = { directory: '/private/tmp/study', runtimeRoot: '/private/runtime', sourceTreeHash: 'a'.repeat(64), runtimeLockHash: 'b'.repeat(64), fixtureManifestHash: 'c'.repeat(64), fixtureInitialSourceHash: 'd'.repeat(64), replay: false, pricing: prices, maxTotalCostUSD: .5 }
+const options = { directory: '/private/tmp/study', runtimeRoot: '/private/runtime', sourceTreeHash: 'a'.repeat(64), runtimeLockHash: 'b'.repeat(64), fixtureManifestHash: 'c'.repeat(64), fixtureValidationHash: '1'.repeat(64), fixtureInitialSourceHash: 'd'.repeat(64), replay: false, pricing: prices, maxTotalCostUSD: .5 }
 
 function recordsFor(plan, { adopted = true, pluginCounts = [10, 10, 10] } = {}) {
   return plan.runs.map(run => {
@@ -21,7 +21,7 @@ function recordsFor(plan, { adopted = true, pluginCounts = [10, 10, 10] } = {}) 
       sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'), runtimePackage: join(plan.runtimeRoot, 'package.json'),
       testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
       ...(plan.replay ? { replayProvider: join(repository, 'scripts/development-replay-provider.js'), controlSource: join(repository, 'test/fixtures/development/json-output-limit/control/json-codec.js') } : {}) }
-    const task = { version: 'development-task-v1', fixtureId: plan.fixtureId, fixtureManifestHash: plan.fixtureManifestHash, configuration: config, timeoutMs: plan.taskBudget.timeoutMs,
+    const task = { version: 'development-task-v1', fixtureId: plan.fixtureId, fixtureManifestHash: plan.fixtureManifestHash, byteBudgetValidation: { version: 'json-output-utf8-v1', cases: 82, validatorHash: plan.fixtureValidationHash }, configuration: config, timeoutMs: plan.taskBudget.timeoutMs,
       shutdownGraceMs: 6000, runtimeVersion: plan.runtimeVersion, runtimeLockHash: plan.runtimeLockHash, sourceTreeHash: plan.sourceTreeHash, patchHash: hash(buildDevelopmentProfile(config)) }
     const taskPlan = { ...task, manifestHash: digest(task) }
     const content = [{ type: 'text', text: 'compressed result' }], contentHash = digest(content)
@@ -39,12 +39,12 @@ function recordsFor(plan, { adopted = true, pluginCounts = [10, 10, 10] } = {}) 
     ].map(event => ({ ...event, manifestHash: taskPlan.manifestHash }))
     const accounting = reconcileDevelopmentLedger(events, { replay: plan.replay, pricing: plan.pricing, model: plan.model, manifestHash: taskPlan.manifestHash })
     const result = { task: plan.fixtureId, group: run.group, replay: plan.replay, plan: taskPlan, ...accounting, passed: true,
-      verification: { passed: true, sourceChanged: true, protectedFilesIntact: true, sourceHash: 'e'.repeat(64), testRun: { tests: 9, passedTests: 9, failedTests: 0, exitCode: 0, stopReason: null } }, workflowOrdered: true, reproduced: true, retested: true, persistenceComplete: true, structuredValuesPreserved: true, stepsRecorded: true,
+      verification: { byteBudgetValidation: { version: 'json-output-utf8-v1', cases: 82, passedCases: 82, failedCases: 0, exitCode: 0, stopReason: null, cleaned: true, sourceHash: 'e'.repeat(64), validatorHash: plan.fixtureValidationHash, outputHash: '2'.repeat(64) }, passed: true, sourceChanged: true, protectedFilesIntact: true, sourceHash: 'e'.repeat(64), testRun: { tests: 9, passedTests: 9, failedTests: 0, exitCode: 0, stopReason: null } }, workflowOrdered: true, reproduced: true, retested: true, persistenceComplete: true, structuredValuesPreserved: true, stepsRecorded: true,
       cli: { cleaned: true, processGroupCleaned: true, escalated: false, exitCode: 0, stopReason: null }, steps: 1 }
     return { runId: run.runId, manifestHash: plan.manifestHash, taskPlan, result, ledgerText: events.map(JSON.stringify).join('\n'),
       sessionEvents: [...['tool-1', 'tool-2', 'tool-3'].map(toolCallId => ({ type: 'tool/result', data: { message: { toolCallId, content } } })),
         { type: 'step/start' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } }],
-      sourceAfter: { sourceTreeHash: plan.sourceTreeHash, runtimeLockHash: plan.runtimeLockHash, fixtureManifestHash: plan.fixtureManifestHash, runtimeVersion: plan.runtimeVersion }, elapsedMs: 100 }
+      sourceAfter: { sourceTreeHash: plan.sourceTreeHash, runtimeLockHash: plan.runtimeLockHash, fixtureManifestHash: plan.fixtureManifestHash, fixtureValidationHash: plan.fixtureValidationHash, runtimeVersion: plan.runtimeVersion }, elapsedMs: 100 }
   })
 }
 
@@ -197,4 +197,29 @@ test('development plans accept unquoted writes only with an explicit reject-nonz
   assert.ok(unpriced.knownPricedUsageUSD > 0)
   assert.ok(unpriced.knownPricedUsageUSD < original.knownPricedUsageUSD)
   assert.throws(() => createDevelopmentStudyPlan({ ...options, pricing: { ...unquoted, cacheWritePolicy: 'ignore' } }), /pricing/i)
+})
+
+test('independent byte-budget evidence rejects forged success flags and binds validator and final source', () => {
+  assert.throws(() => createDevelopmentStudyPlan({ ...options, fixtureValidationHash: undefined }), TypeError)
+  const plan = createDevelopmentStudyPlan(options)
+  for (const change of [null, { version: 'older' }, { cases: 81 }, { passedCases: 81 }, { failedCases: 1 }, { exitCode: 1 },
+    { stopReason: 'timeout' }, { cleaned: false }, { sourceHash: '0'.repeat(64) }, { validatorHash: '0'.repeat(64) }, { outputHash: 'bad' }]) {
+    const rows = recordsFor(plan)
+    rows[0].result.verification.byteBudgetValidation = change === null ? null : { ...rows[0].result.verification.byteBudgetValidation, ...change, passed: true }
+    const summary = summarizeDevelopmentStudy(plan, rows)
+    assert.equal(summary.qualityComplete, false, JSON.stringify(change))
+    assert.equal(summary.accepted, false)
+    assert.equal(summary.costComplete, true)
+  }
+  for (const change of [null, { version: 'older' }, { cases: 81 }, { validatorHash: '0'.repeat(64) }, { extra: true }]) {
+    const rows = recordsFor(plan)
+    const task = rows[0].taskPlan
+    task.byteBudgetValidation = change === null ? null : { ...task.byteBudgetValidation, ...change }
+    const { manifestHash, ...body } = task
+    task.manifestHash = digest(body)
+    assert.equal(summarizeDevelopmentStudy(plan, rows).configurationComplete, false)
+  }
+  const rows = recordsFor(plan)
+  delete rows[0].sourceAfter.fixtureValidationHash
+  assert.equal(summarizeDevelopmentStudy(plan, rows).configurationComplete, false)
 })

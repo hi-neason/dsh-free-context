@@ -24,6 +24,8 @@ test('nine balanced actual CLI coding replays persist plans before execution and
       assert.equal(slot, studyPlan.runs[taskPlans - 1])
       assert.equal(Object.isFrozen(taskPlan.configuration), true)
       assert.equal(Object.isFrozen(slot), true)
+      assert.equal(taskPlan.byteBudgetValidation.validatorHash, studyPlan.fixtureValidationHash)
+      assert.equal(taskPlan.byteBudgetValidation.cases, 82)
       const saved = (await readFile(join(directory, 'study-task-plans.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
       assert.equal(saved.length, taskPlans)
       assert.equal(saved.at(-1).taskPlan.manifestHash, taskPlan.manifestHash)
@@ -31,6 +33,8 @@ test('nine balanced actual CLI coding replays persist plans before execution and
     },
     async onResult(record) {
       results++
+      assert.equal(record.result.verification.byteBudgetValidation.passedCases, 82)
+      assert.equal(record.sourceAfter.fixtureValidationHash, record.taskPlan.byteBudgetValidation.validatorHash)
       assert.equal(taskPlans, results)
       const starts = (await readFile(join(directory, 'study-task-plans.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
       assert.equal(starts.length, results)

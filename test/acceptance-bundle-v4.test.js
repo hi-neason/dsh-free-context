@@ -19,7 +19,7 @@ const provenance = { runtimeVersion: '0.2.1-rc.2', repositoryCommit: 'a'.repeat(
 const options = { pricing, provenance }
 const inputs = { rootDir: '/private/tmp/bundle-test', bundleId: 'bundle-test', seed: 20261026, replay: false, ...options, maxTotalCostUSD: 1, maxTotalCalls: 1992, knownPriorSpendUSD: .979656936, priorUnpricedCalls: 1,
   runtimes: { agent: { root: '/private/runtime/agent', lockHash: 'c'.repeat(64), version: '0.2.1-rc.2' }, cli: { root: '/private/runtime/cli', lockHash: 'd'.repeat(64), version: '0.2.1-rc.2' } },
-  developmentIdentity: { fixtureManifestHash: 'e'.repeat(64), fixtureInitialSourceHash: 'f'.repeat(64) } }
+  developmentIdentity: { fixtureManifestHash: 'e'.repeat(64), fixtureValidationHash: '1'.repeat(64), fixtureInitialSourceHash: 'f'.repeat(64) } }
 
 function benchmarkRecords(plan) {
   return plan.runs.map(run => {
@@ -53,7 +53,7 @@ function recordsFor(plan, { adopted = true, pluginCounts = [10, 10, 10] } = {}) 
       sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'), runtimePackage: join(plan.runtimeRoot, 'package.json'),
       testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
       ...(plan.replay ? { replayProvider: join(repository, 'scripts/development-replay-provider.js'), controlSource: join(repository, 'test/fixtures/development/json-output-limit/control/json-codec.js') } : {}) }
-    const task = { version: 'development-task-v1', fixtureId: plan.fixtureId, fixtureManifestHash: plan.fixtureManifestHash, configuration: config, timeoutMs: plan.taskBudget.timeoutMs,
+    const task = { version: 'development-task-v1', fixtureId: plan.fixtureId, fixtureManifestHash: plan.fixtureManifestHash, byteBudgetValidation: { version: 'json-output-utf8-v1', cases: 82, validatorHash: plan.fixtureValidationHash }, configuration: config, timeoutMs: plan.taskBudget.timeoutMs,
       shutdownGraceMs: 6000, runtimeVersion: plan.runtimeVersion, runtimeLockHash: plan.runtimeLockHash, sourceTreeHash: plan.sourceTreeHash, patchHash: hash(buildDevelopmentProfile(config)) }
     const taskPlan = { ...task, manifestHash: digest(task) }
     const content = [{ type: 'text', text: 'compressed result' }], contentHash = digest(content)
@@ -71,12 +71,12 @@ function recordsFor(plan, { adopted = true, pluginCounts = [10, 10, 10] } = {}) 
     ].map(event => ({ ...event, manifestHash: taskPlan.manifestHash }))
     const accounting = reconcileDevelopmentLedger(events, { replay: plan.replay, pricing: plan.pricing, model: plan.model, manifestHash: taskPlan.manifestHash })
     const result = { task: plan.fixtureId, group: run.group, replay: plan.replay, plan: taskPlan, ...accounting, passed: true,
-      verification: { passed: true, sourceChanged: true, protectedFilesIntact: true, sourceHash: 'e'.repeat(64), testRun: { tests: 9, passedTests: 9, failedTests: 0, exitCode: 0, stopReason: null } }, workflowOrdered: true, reproduced: true, retested: true, persistenceComplete: true, structuredValuesPreserved: true, stepsRecorded: true,
+      verification: { byteBudgetValidation: { version: 'json-output-utf8-v1', cases: 82, passedCases: 82, failedCases: 0, exitCode: 0, stopReason: null, cleaned: true, sourceHash: 'e'.repeat(64), validatorHash: plan.fixtureValidationHash, outputHash: '2'.repeat(64) }, passed: true, sourceChanged: true, protectedFilesIntact: true, sourceHash: 'e'.repeat(64), testRun: { tests: 9, passedTests: 9, failedTests: 0, exitCode: 0, stopReason: null } }, workflowOrdered: true, reproduced: true, retested: true, persistenceComplete: true, structuredValuesPreserved: true, stepsRecorded: true,
       cli: { cleaned: true, processGroupCleaned: true, escalated: false, exitCode: 0, stopReason: null }, steps: 1 }
     return { runId: run.runId, manifestHash: plan.manifestHash, taskPlan, result, ledgerText: events.map(JSON.stringify).join('\n'),
       sessionEvents: [...['tool-1', 'tool-2', 'tool-3'].map(toolCallId => ({ type: 'tool/result', data: { message: { toolCallId, content } } })),
         { type: 'step/start' }, { type: 'turn/end', data: { reason: { kind: 'completed' } } }],
-      sourceAfter: { sourceTreeHash: plan.sourceTreeHash, runtimeLockHash: plan.runtimeLockHash, fixtureManifestHash: plan.fixtureManifestHash, runtimeVersion: plan.runtimeVersion }, elapsedMs: 100 }
+      sourceAfter: { sourceTreeHash: plan.sourceTreeHash, runtimeLockHash: plan.runtimeLockHash, fixtureManifestHash: plan.fixtureManifestHash, fixtureValidationHash: plan.fixtureValidationHash, runtimeVersion: plan.runtimeVersion }, elapsedMs: 100 }
   })
 }
 
@@ -210,6 +210,10 @@ test('cached child verdicts cannot rescue altered raw JSON, usage, protocols or 
     r => { r.benchmarkReport.evaluationKind = 'acceptance-v3-live-provider' },
     r => { r.developmentReport.records[0].sessionEvents = [] },
     r => { r.developmentReport.records[0].result.verification.testRun.passedTests = 8 },
+    r => { delete r.developmentReport.records[0].result.verification.byteBudgetValidation },
+    r => { r.developmentReport.records[0].result.verification.byteBudgetValidation.passedCases = 81 },
+    r => { r.developmentReport.records[0].result.verification.byteBudgetValidation.validatorHash = '0'.repeat(64) },
+    r => { delete r.developmentReport.records[0].sourceAfter.fixtureValidationHash },
     r => { r.developmentReport.records[0].ledgerText += '\ncorrupted-json' },
     r => { r.developmentReport.records[0].result.estimatedCostUSD = 0 },
   ]) {
@@ -523,4 +527,13 @@ test('a fully metered truncated auxiliary call is priced but cannot satisfy expe
     assert.equal(rejected.totalCostUSD, null)
     assert.equal(rejected.accepted, false)
   }
+})
+
+
+test('root development identity requires the independently frozen validator hash', () => {
+  const { fixtureValidationHash, ...oldIdentity } = inputs.developmentIdentity
+  assert.throws(() => createAcceptanceBundlePlanV4({ ...inputs, developmentIdentity: oldIdentity }), TypeError)
+  assert.throws(() => createAcceptanceBundlePlanV4({ ...inputs, developmentIdentity: { ...inputs.developmentIdentity, fixtureValidationHash: 'bad' } }), TypeError)
+  const plan = createAcceptanceBundlePlanV4(inputs)
+  assert.equal(plan.developmentPlan.fixtureValidationHash, fixtureValidationHash)
 })

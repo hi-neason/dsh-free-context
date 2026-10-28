@@ -60,7 +60,7 @@ export async function evaluateAcceptanceBundleV4({ rootDir, bundleId, seed = 202
       acceptanceSourceHash(repository), runtimeIdentity(agentRoot, 'agent'), runtimeIdentity(cliRoot, 'cli'), loadDevelopmentFixture('json-output-limit'),
     ])
     return { state: { sourceTreeHash, runtimes: { agent, cli } },
-      developmentIdentity: { fixtureManifestHash: fixture.manifestHash, fixtureInitialSourceHash: fixture.manifest.files['workspace/src/json-codec.js'].sha256 } }
+      developmentIdentity: { fixtureManifestHash: fixture.manifestHash, fixtureValidationHash: fixture.byteBudgetValidation.validatorHash, fixtureInitialSourceHash: fixture.manifest.files['workspace/src/json-codec.js'].sha256 } }
   }
   const initial = await capture()
   const provenance = { runtimeVersion: initial.state.runtimes.agent.version, runtimeLockHash: initial.state.runtimes.agent.lockHash,
