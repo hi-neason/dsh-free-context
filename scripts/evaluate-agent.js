@@ -133,7 +133,8 @@ export function collectReadAdoptions(events, modelCalls, decisions, toolCalls) {
   })
 }
 
-export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs, experimentalConfig, adapterFactory, maxSteps = criteria.maxSteps, configureContext, composeWithTunedNative = false, validationFeedbackLimit = 0, readText = false, encodeArtifacts = false } = {}) {
+export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs, experimentalConfig, adapterFactory, maxSteps = criteria.maxSteps, configureContext, composeWithTunedNative = false, validationFeedbackLimit = 0, readText = false, encodeArtifacts = false, encodeToolText = false } = {}) {
+  if (typeof encodeToolText !== 'boolean') throw new TypeError('encodeToolText must be a boolean')
   if (typeof readText !== 'boolean') throw new TypeError('readText must be a boolean')
   if (typeof encodeArtifacts !== 'boolean' || encodeArtifacts && !readText) throw new TypeError('encodeArtifacts requires boolean readText enabled')
   if (!Number.isSafeInteger(validationFeedbackLimit) || validationFeedbackLimit < 0 || validationFeedbackLimit > 2) throw new TypeError('Validation feedback limit must be 0..2')
@@ -248,8 +249,10 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     }
     if (group === 'plugin') await ctx.plugin(plugin, historyRetirement
       ? { mode: 'apply', tools: readText ? ['read'] : [], retirement: historyRetirement,
+        ...(encodeToolText ? { text: { enabled: true } } : {}),
         ...(readText ? { readText: { enabled: true, ...(encodeArtifacts ? { encodeArtifacts: true } : {}) } } : {}) }
       : { mode: 'apply', tools: [fixture.ptc ? 'run_code' : 'fixture', ...(readText ? ['read'] : [])], minInputBytes: 0, logs: { enabled: true },
+        ...(encodeToolText ? { text: { enabled: true } } : {}),
         ...(readText ? { readText: { enabled: true, ...(encodeArtifacts ? { encodeArtifacts: true } : {}) } } : {}) })
     if (group === 'plugin' && experimentalConfig) {
       ctx.provide('freeContextQuery', { getQuery: () => fixture.phases?.[phaseIndex]?.query ?? fixture.query })
@@ -368,7 +371,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       ...(historyRetirement ? { historyRetirement, retirements: retirements.map(record => ({ ...record,
         ...(record.reason === 'retired' ? { actualPostRetirementSteps: steps - record.beforeStep + 1 } : {}) })) } : {}),
       decisions: decisions.map(({ strategy, outcome, reason, input, output }) => ({ strategy, outcome, reason, input, output })),
-      configuration: { maxInlineTokens, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: composeWithTunedNative, validationFeedbackLimit, maxSteps, timeoutMs,
+      configuration: { ...(encodeToolText ? { encodeToolText: group === 'plugin' } : {}), maxInlineTokens, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: composeWithTunedNative, validationFeedbackLimit, maxSteps, timeoutMs,
         ...(readText ? { readText: { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, ...(encodeArtifacts ? { encodeArtifacts: group === 'plugin' } : {}) } } : {}) },
       ...(readClassification ? { readClassification } : {}),
       turnEnds: events.filter(event => event.type === 'turn/end').map(event => ({ kind: event.data.reason.kind, code: event.data.reason.error?.code })),
