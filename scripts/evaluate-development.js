@@ -21,7 +21,7 @@ export function parseDevelopmentLedger(text) {
     if (!line.trim()) continue
     try {
       const event = JSON.parse(line)
-      if (!event || typeof event !== 'object' || Array.isArray(event) || !['model/start', 'model/end', 'tool', 'decision', 'limit', 'process/exit'].includes(event.type)) throw new Error('invalid event')
+      if (!event || typeof event !== 'object' || Array.isArray(event) || !['model/start', 'model/end', 'tool', 'decision', 'limit', 'process/exit', 'compression/input', 'compression/output'].includes(event.type)) throw new Error('invalid event')
       events.push(event)
     } catch { errors.push({ line: index + 1, reason: 'invalid-ledger-record' }) }
   }
@@ -56,7 +56,7 @@ export function inspectDevelopmentWorkflow(tools, initialHash, finalHash) {
     workflowOrdered: failure >= 0 && changed > failure && success > changed && ['bash', 'write', 'edit'].includes(tools[changed].name) }
 }
 
-async function sessionRecords(directory, sessionId) {
+export async function readDevelopmentSessionRecords(directory, sessionId) {
   const records = []
   let bytes = 0, files = 0
   async function visit(path) {
@@ -89,8 +89,7 @@ export function buildDevelopmentProfile(config) {
     '- id: spill-local', '  config:', `    root: ${JSON.stringify(config.spill)}`,
     '- insert:')
   if (config.replay) lines.push('    - id: development-replay-provider', `      name: ${JSON.stringify(config.replayProvider)}`)
-  if (config.plugin) lines.push('    - id: free-context', `      name: ${JSON.stringify(join(repository, 'src/index.js'))}`, '      config:', '        mode: apply', `        tools: ${JSON.stringify(config.tools)}`, '        minInputBytes: 0')
-  lines.push('    - id: development-native-spill', "      name: '@deepseek-ai/dsh-spill-policy'", '      config:', `        maxInlineTokens: ${config.maxInlineTokens}`, '    - id: development-observer', `      name: ${JSON.stringify(fileURLToPath(new URL('./development-cli-observer.js', import.meta.url)))}`)
+  lines.push('    - id: development-context-stack', `      name: ${JSON.stringify(fileURLToPath(new URL('./development-context-stack.js', import.meta.url)))}`)
   if (config.replay) lines.push('      inject: [developmentReplayReady]')
   return lines.join('\n') + '\n'
 }
@@ -114,7 +113,7 @@ export async function runDevelopmentTask(fixtureId, group, { directory, replay =
   await mkdir(profile, { recursive: true, mode: 0o700 })
   await writeFile(join(profile, 'package.json'), JSON.stringify({ private: true, dependencies: {}, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'] } } }), { flag: 'wx', mode: 0o600 })
   const config = { runId: randomUUID(), group, replay, model, pricing, workspace, maxSteps, maxCalls, maxCostUSD,
-    tools: ['bash', 'read', 'grep'], instructionMaxBytes: 0, policyInstallationOrder: ['free-context-if-enabled', 'native-spill', 'observer'], plugin: group === 'plugin', maxInlineTokens: group === 'baseline-default' ? 12500 : 1200,
+    tools: ['bash', 'read', 'grep'], instructionMaxBytes: 0, policyInstallationOrder: ['compression-input', 'free-context-if-enabled', 'compression-output', 'native-spill', 'observer'], plugin: group === 'plugin', maxInlineTokens: group === 'baseline-default' ? 12500 : 1200,
     sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'), runtimePackage: join(runtime, 'package.json'),
     testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
     ...(replay ? { replayProvider: fileURLToPath(new URL('./development-replay-provider.js', import.meta.url)), controlSource: fileURLToPath(new URL('../test/fixtures/development/json-output-limit/control/json-codec.js', import.meta.url)) } : {}) }
@@ -144,7 +143,7 @@ export async function runDevelopmentTask(fixtureId, group, { directory, replay =
   } catch { auditErrors.push({ reason: 'ledger-unreadable' }) }
   try {
     cli = parseLines(execution.stdout)
-    persisted = await sessionRecords(config.sessions, cli.find(event => event.type === 'session')?.sessionId)
+    persisted = await readDevelopmentSessionRecords(config.sessions, cli.find(event => event.type === 'session')?.sessionId)
     auditReadable = ledgerReadable && events.every(event => event.manifestHash === plan.manifestHash) && persisted.length > 0
   } catch { auditErrors.push({ reason: 'session-or-cli-unreadable' }) }
   const accounting = reconcileDevelopmentLedger(events, { replay, pricing, model, manifestHash: plan.manifestHash, ledgerComplete: ledgerReadable })

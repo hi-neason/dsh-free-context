@@ -99,21 +99,31 @@ test('a damaged billing journal preserves known synthetic calls and explicitly f
 test('final observer hashes match compression, downstream native spill, durable results and model inputs', { skip: process.platform === 'win32', timeout: 90000 }, async t => {
   const base = await mkdtemp(join(tmpdir(), 'dsh-coding-transform-'))
   t.after(() => rm(base, { recursive: true, force: true }))
-  for (const maxInlineTokens of [1200, 128]) {
-    const root = join(base, String(maxInlineTokens)), home = join(root, 'home')
+  for (const [maxInlineTokens, suppressCandidate] of [[1200, false], [128, false], [1200, true]]) {
+    const root = join(base, `${maxInlineTokens}-${suppressCandidate}`), home = join(root, 'home')
     await mkdir(join(home, 'profiles/headless'), { recursive: true })
     await writeFile(join(home, 'profiles/headless/package.json'), JSON.stringify({ private: true, dependencies: {}, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'] } } }))
-    const config = { replay: true, model: 'scripted', plugin: true, tools: ['cli_fixture'], maxInlineTokens, workspace: root, sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'),
+    const config = { replay: true, model: 'scripted', plugin: true, tools: ['cli_fixture'], maxInlineTokens, suppressCandidate, workspace: root, sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'),
       replayProvider: fileURLToPath(new URL('../fixtures/development-transform-provider.js', import.meta.url)), maxSteps: 4, maxCalls: 4, maxCostUSD: 1, runtimePackage: join(runtimeRoot, 'package.json'), testCommands: [], manifestHash: `synthetic-conversion-${maxInlineTokens}` }
     await writeFile(config.ledger, '')
     const observer = join(root, 'observer.json'), patch = join(root, 'patch.yml')
     await writeFile(observer, JSON.stringify(config)); await writeFile(patch, buildDevelopmentProfile(config))
     const child = await runEvaluationProcess(process.execPath, [join(runtimeRoot, 'node_modules/@deepseek-ai/dsh/lib/bin.js'), '--profile', 'headless', '--patch', patch, '--json', 'Call cli_fixture, then acknowledge its output.'], { cwd: root, timeoutMs: 30000,
       env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root, DSH_HOME: home, DSH_AGENTS_HOME: join(root, 'agents'), DSH_TELEMETRY_DISABLED: '1', DSH_DEVELOPMENT_CONFIG: observer, DSH_CLI_RUNTIME_PACKAGE: join(runtimeRoot, 'package.json') } })
-    assert.equal(child.exitCode, 0)
+    assert.equal(child.exitCode, 0, child.stderr)
     const ledger = (await readFile(config.ledger, 'utf8')).trim().split('\n').map(JSON.parse)
     const tool = ledger.find(event => event.type === 'tool')
     assert.ok(ledger.some(event => event.type === 'decision' && event.outcome === 'selected'))
+    const input = ledger.find(event => event.type === 'compression/input' && event.callId === tool.callId)
+    const output = ledger.find(event => event.type === 'compression/output' && event.callId === tool.callId)
+    if (suppressCandidate) {
+      assert.equal(output.contentHash, input.contentHash)
+      assert.equal(output.bytes, input.bytes)
+    } else {
+      assert.notEqual(output.contentHash, input.contentHash, JSON.stringify(ledger.map(event => ({ type: event.type, hash: event.contentHash, outcome: event.outcome }))))
+      assert.ok(output.bytes < input.bytes)
+    }
+    assert.equal(output.contentHash === tool.contentHash, maxInlineTokens === 1200 && !suppressCandidate)
     assert.notEqual(tool.contentHash, tool.valueHash)
     assert.equal(tool.valueHash, tool.finalValueHash)
     assert.ok(ledger.some(event => event.type === 'model/start' && event.visibleToolResults.some(value => value.callId === tool.callId && value.contentHash === tool.contentHash)))
@@ -121,7 +131,7 @@ test('final observer hashes match compression, downstream native spill, durable 
     const rows = (await Promise.all(files.map(path => readFile(join(config.sessions, path), 'utf8')))).flatMap(text => text.trim().split('\n').map(JSON.parse))
     const persisted = rows.find(event => event.type === 'tool/result')
     assert.equal(hash(persisted.data.message.content), tool.contentHash)
-    if (maxInlineTokens === 1200) assert.equal(JSON.parse(persisted.data.message.content[0].text).format, 'dsh-json-rows')
+    if (maxInlineTokens === 1200 && !suppressCandidate) assert.equal(JSON.parse(persisted.data.message.content[0].text).format, 'dsh-json-rows')
     else assert.ok((await readdir(config.spill, { recursive: true })).length > 0)
   }
 })
