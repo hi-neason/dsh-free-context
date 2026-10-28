@@ -436,7 +436,7 @@ test('compiler coverage is source-bound, rendered with lossy guidance, archived 
   const output = await f.handler(execution(), original, async () => ({ kind: 'accept' }))
   assert.match(output.content[0].text, /Compiler header coverage \(supported grammar only, not semantic completeness\)/)
   assert.match(output.content[0].text, /LOSSY/)
-  assert.match(output.content[0].text, /recover the original for missing evidence, completeness checks/)
+  assert.match(output.content[0].text, /Recover omitted\/exact evidence or check completeness/)
   const coverage = JSON.parse(f.saves[1].content).coverage
   assert.equal(output.content[0].text.includes(JSON.stringify(coverage)), false)
   assert.ok(output.content[0].text.includes(JSON.stringify(coverage.scanned)))
@@ -501,6 +501,9 @@ test('compact shared recovery guidance preserves both receipts, exact paged reco
   assert.ok(manifest.audit.request.messages[0].content[0].text.includes(f.saves[0].content.split('\n\n')[0]))
   assert.equal(manifest.audit.response[0].text, '{"selectedIds":["p1"]}')
   assert.equal(manifest.callUsage.inputTokens, 100)
+  const previousGuidance = 'Verbatim excerpts: recover the original for missing evidence, completeness checks, or exact verification. Use registered IDs with free_context_recall if installed, otherwise retrievalHint/read/grep where supported. Read all pages; verify full UTF-8 bytes and SHA-256 against the receipt, not the current source file. Partial reads/grep do not verify completeness.'
+  const currentGuidance = text.split('\n\n').find(part => part.startsWith('Recover omitted/exact evidence'))
+  assert.ok(Buffer.byteLength(previousGuidance) - Buffer.byteLength(currentGuidance) >= 50)
   assert.match(text, /free_context_recall/)
   assert.match(text, /UTF-8 bytes and SHA-256/)
   assert.match(text, /all pages/)
@@ -512,7 +515,7 @@ test('compact shared recovery guidance preserves both receipts, exact paged reco
   assert.equal(text.split('free_context_recall').length - 1, 1)
   const compact = formatSnapshotReference(refs[1], { includeGuidance: false })
   const full = formatSnapshotReference(refs[1])
-  assert.ok(Buffer.byteLength(full) - Buffer.byteLength(compact) > 400)
+  assert.ok(Buffer.byteLength(full) - Buffer.byteLength(compact) > 250)
   assert.equal(JSON.parse(f.saves[1].content).originalReceipt.sha256, refs[0].sha256)
 })
 

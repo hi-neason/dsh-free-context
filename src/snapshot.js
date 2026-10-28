@@ -80,8 +80,8 @@ export function formatSnapshotReference(receipt, { includeGuidance = true } = {}
   if (!includeGuidance) return reference.join('\n')
   return [
     reference[0],
-    `${reference[1]} For verified recovery, use this registered ID with free_context_recall if installed.`,
-    'Retrieve this snapshot when the task requires omitted evidence, a completeness check, or the exact original. Use the backend retrievalHint and existing read/grep tools when supported; read all pages for full recovery. Do not substitute the current source file.',
-    'For full recovery, verify the UTF-8 byte count and SHA-256 of the complete retrieved text against this receipt. A partial read or grep match does not verify the full snapshot.',
+    `${reference[1]} Use registered ID in free_context_recall if installed.`,
+    'For omitted evidence, completeness checks or exact text, use this snapshot via supported retrievalHint/read/grep, never the current source file.',
+    "For full recovery, verify the complete text's UTF-8 byte count and SHA-256 against this receipt; read all pages. A partial read or grep does not verify the full snapshot.",
   ].join('\n')
 }

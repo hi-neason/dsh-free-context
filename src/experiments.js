@@ -115,7 +115,7 @@ export function apply(ctx, input) {
       const text = [`[LOSSY ${config.selectionMode === 'diagnostic-evidence' ? 'diagnostic evidence' : 'paragraph'} selection; policy ${selection.strategy}. Extracted source spans do not prove complete evidence.]`,
         selection.text,
         ...(selection.coverage ? [`Compiler header coverage (supported grammar only, not semantic completeness): scanned=${JSON.stringify(selection.coverage.scanned)}, retained=${JSON.stringify(selection.coverage.retained)} BEFORE downstream retention; NOT final inline coverage. For omitted excerpts recover the full spilled tool output; full coverage metadata is in the audit.`] : []),
-        'Verbatim excerpts: recover the original for missing evidence, completeness checks, or exact verification. Use registered IDs with free_context_recall if installed, otherwise retrievalHint/read/grep where supported. Read all pages; verify full UTF-8 bytes and SHA-256 against the receipt, not the current source file. Partial reads/grep do not verify completeness.',
+        'Recover omitted/exact evidence or check completeness via registered IDs with free_context_recall if installed; else retrievalHint/read/grep where supported. Read all pages; verify UTF-8 bytes and SHA-256 against receipt, not the current source file. Partial reads/grep do not verify completeness.',
         formatSnapshotReference(originalReceipt, { includeGuidance: false }),
         'Audit (full request, response, usage and selection metadata):', formatSnapshotReference(manifestReceipt, { includeGuidance: false })].join('\n\n')
       const replacement = [{ ...content[0], text }]
