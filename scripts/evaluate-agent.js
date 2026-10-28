@@ -1,4 +1,4 @@
-import { containsPlaceholder } from './evaluation-contract.js'
+import { containsPlaceholder, validateResponseSchema, responseSchemaIssues, phaseResponseSchema } from './evaluation-contract.js'
 import { validUsage, summarizeUsage, priceUsage, safeFailure } from './evaluation-accounting.js'
 export { summarizeUsage, priceUsage } from './evaluation-accounting.js'
 import { createHash, randomUUID } from 'node:crypto'
@@ -97,6 +97,8 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
   if (!Number.isSafeInteger(validationFeedbackLimit) || validationFeedbackLimit < 0 || validationFeedbackLimit > 2) throw new TypeError('Validation feedback limit must be 0..2')
   if (fixture.rejectPlaceholderValues !== undefined && typeof fixture.rejectPlaceholderValues !== 'boolean') throw new TypeError('Placeholder response contract must be boolean')
   if (fixture.discoverSourcePath !== undefined && typeof fixture.discoverSourcePath !== 'boolean') throw new TypeError('Source discovery must be boolean')
+  validateResponseSchema(fixture.responseSchema)
+  for (const phase of fixture.phases ?? []) validateResponseSchema(phaseResponseSchema(fixture, phase))
   if (!groups.includes(group)) throw new TypeError('Unknown evaluation group')
   if (!replay && !key) throw new TypeError('Missing explicit credential')
   const directory = await mkdtemp(join(tmpdir(), 'dsh-agent-eval-'))
@@ -213,10 +215,13 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
         const answer = phaseMessages.at(-1)?.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
         let actual = null
         let parsed = false
-        try { actual = JSON.parse(answer); parsed = actual !== null && typeof actual === 'object' } catch {}
+        try { actual = JSON.parse(answer); parsed = true } catch {}
         const issues = []
         if (!turnCompleted || !phaseMessages.length) issues.push('This phase did not produce a fresh answer in a completed turn.')
-        if (!parsed) issues.push('Return the requested JSON object only, without prose or Markdown.')
+        const responseSchema = phaseResponseSchema(fixture, phase)
+        const rootValid = responseSchema !== undefined || actual !== null && typeof actual === 'object'
+        if (!parsed || !rootValid) issues.push(responseSchema === undefined ? 'Return the requested JSON object only, without prose or Markdown.' : 'Return valid JSON only, without prose or Markdown.')
+        if (parsed) issues.push(...responseSchemaIssues(actual, responseSchema).map(issue => `Response schema: ${issue}`))
         if (parsed && fixture.rejectPlaceholderValues && containsPlaceholder(actual)) issues.push('The response contains placeholder values instead of the requested source facts. Inspect available original evidence and return supported literal values, without placeholders.')
         if (!toolCalls.some(call => call.name === (fixture.ptc ? 'run_code' : 'fixture') && !call.isError && (!fixture.requireFixtureEachPhase || call.phase === index))) issues.push('Use the required fixture tool in this phase before answering.')
         if (fixture.requireReadEachPhase && !toolCalls.some(call => call.phase === index && call.name === 'read' && !call.isError)) issues.push('Read the required source in this phase before answering.')
@@ -225,7 +230,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
         if (fixture.edit && index === (fixture.phases?.length ?? 1) - 1 && !toolCalls.some(call => call.phase === index && ['edit', 'write'].includes(call.name) && !call.isError)) issues.push('Perform the requested file edit and verify it by reading the file.')
         drafts.push({ phase: index, correction, actual, exactFacts: isDeepStrictEqual(actual, phase.expected), issues })
         if (!issues.length || correction === validationFeedbackLimit || stoppedReason || steps >= maxSteps) {
-          phaseResults.push({ actual, turnCompleted, freshAnswer: phaseMessages.length > 0, passed: turnCompleted && phaseMessages.length > 0 && isDeepStrictEqual(actual, phase.expected) })
+          phaseResults.push({ actual, turnCompleted, freshAnswer: phaseMessages.length > 0, passed: parsed && rootValid && turnCompleted && phaseMessages.length > 0 && isDeepStrictEqual(actual, phase.expected), ...(responseSchema !== undefined ? { responseText: answer ?? null } : {}) })
           break
         }
         feedback.push({ phase: index, correction: correction + 1, issues })
@@ -251,10 +256,16 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     const snapshotRecovered = !snapshotRecoveryRequired || (fixture.requireSnapshot ? snapshotRecoveryByPhase.every(phase => phase.recovered) : toolCalls.some(call => call.readSnapshot && !call.isError))
     const failedTurn = events.some(event => event.type === 'turn/end' && event.data.reason.kind !== 'completed')
     const responseContractSatisfied = !fixture.rejectPlaceholderValues || phaseResults.every(phase => !containsPlaceholder(phase.actual))
-    const passed = responseContractSatisfied && exactFacts && requiredTools && snapshotRecovered && !failedTurn && !stoppedReason && attempts.length === 0 && steps <= maxSteps
+    const responseSchemaSatisfied = phaseResults.every((phase, index) => {
+      const schema = phaseResponseSchema(fixture, fixture.phases?.[index] ?? fixture)
+      if (schema === undefined) return true
+      try { return typeof phase.responseText === 'string' && isDeepStrictEqual(JSON.parse(phase.responseText), phase.actual) && responseSchemaIssues(phase.actual, schema).length === 0 }
+      catch { return false }
+    })
+    const passed = responseSchemaSatisfied && responseContractSatisfied && exactFacts && requiredTools && snapshotRecovered && !failedTurn && !stoppedReason && attempts.length === 0 && steps <= maxSteps
     const fileCorrect = !fixture.edit || await readFile(source, 'utf8') === fixture.editedText
     return { task: fixture.id, group, replay, passed: passed && fileCorrect, fileCorrect, exactFacts, requiredTools, snapshotRecoveryRequired, snapshotRecovered, actual, finalAnswer: text ?? null, startedAt, steps,
-      drafts, feedback, correctionCount: feedback.length, responseContractSatisfied, attempts: attempts.length, usageComplete, modelCalls, phaseResults, experiments, snapshotRecoveryByPhase,
+      drafts, feedback, correctionCount: feedback.length, responseContractSatisfied, responseSchemaSatisfied, attempts: attempts.length, usageComplete, modelCalls, phaseResults, experiments, snapshotRecoveryByPhase,
       adoptions: collectAdoptions(events, modelCalls),
       recoveryCalls: toolCalls.filter(call => call.readSnapshot).length,
       usageKind: replay ? 'synthetic-replay' : 'provider-reported', usage,

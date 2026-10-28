@@ -127,3 +127,28 @@ test('a forged contract flag cannot certify source-null values under an explicit
   for (const row of data) row.responseContractSatisfied = true
   assert.equal(summarizePlannedAcceptance(plan, plan, data, { pricing, provenance }).qualityComplete, false)
 })
+
+test('response schema is independently checked despite forged completion flags', () => {
+  const plan = createAcceptancePlan()
+  plan.tasks = plan.tasks.map(task => task.id === 'json-repeated' ? { ...task, responseSchema: { type: 'null' } } : task)
+  const data = records(plan)
+  for (const row of data) row.responseSchemaSatisfied = true
+  assert.equal(summarizePlannedAcceptance(plan, plan, data, { pricing, provenance }).qualityComplete, false)
+})
+
+test('schema summaries independently parse raw answers and reject missing or forged parse evidence', () => {
+  const plan = createAcceptancePlan()
+  const target = 'json-repeated'
+  plan.tasks = plan.tasks.map(task => task.id === target ? { ...task, responseSchema: { type: 'object' } } : task)
+  const data = records(plan)
+  for (const row of data.filter(row => row.task === target)) {
+    row.responseSchemaSatisfied = true
+    for (const phase of row.phaseResults) phase.responseText = JSON.stringify(phase.actual)
+  }
+  assert.equal(summarizePlannedAcceptance(plan, plan, data, { pricing, provenance }).qualityComplete, true)
+  const row = data.find(row => row.task === target)
+  row.phaseResults[0].responseText = 'not-json'
+  assert.equal(summarizePlannedAcceptance(plan, plan, data, { pricing, provenance }).qualityComplete, false)
+  row.phaseResults[0].responseText = 'null'
+  assert.equal(summarizePlannedAcceptance(plan, plan, data, { pricing, provenance }).qualityComplete, false)
+})

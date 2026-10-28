@@ -655,3 +655,5 @@ DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:acceptance -- --version 3 \
 因此本批 **`fullAccepted=false`，原始十四项联合验收仍未通过**。此前三类实验的独立限定收益结果继续成立，但不能拼接为本批通过。重试清单哈希为 `d09a56cfdddf58d2b1e9b95ed7b7ffd1cb1fb930c1403563cc195e51038e734b`；完整原始记录、预算停止及先前失败均保留。
 
 自定义评测 fixture 可显式设置 `discoverSourcePath: true`：初始提示不再提前提供文件路径，`fixture` 工具返回数据及末尾的原始文件 locator，模型据此读取随机文件名的原始数据。这为“先观察结果、再读取源文件”的任务建立工具数据依赖；真实调用顺序仍须从记录验证。默认关闭，旧提示和工具内容保持不变；现有冻结 v1/v2/v3 任务及结论不会追溯启用它。官方运行时测试覆盖三组读取、原生 1200 上限后的 locator 保留，以及包含 locator 的精确工具快照恢复；尚未将该新场景作为真实校准通过证据。
+
+评测 fixture 或单独 phase 还可声明可选 `responseSchema`，用于约束答案格式。例如文件内容任务可显式要求 `version`、`retryLimit` 为整数并禁止额外包装字段。支持的类型为 object、array、string、number、integer、boolean、null；关键字子集为 `type`、对象 `properties`/`required`/`additionalProperties` 和数组 `items`，不支持 `const`、`enum`、`$ref` 等关键字；非法、递归或过大的 schema 在模型调用前拒绝。反馈只包含声明的路径、类型和格式问题，不提供标准答案值。三组沿用同一纠正上限，额外调用仍计费；汇总器独立重算格式约束，精确事实验收保持单独执行。未声明时保持旧行为，既有冻结任务和结果不追溯更改。这只能检查格式，不能证明字段事实正确或诊断完整。
