@@ -3,6 +3,7 @@ import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { readFileSync } from 'node:fs'
 import { decodeLosslessText } from '../../src/lossless-text.js'
+import { formatSnapshotReference } from '../../src/snapshot.js'
 const config = JSON.parse(readFileSync(process.env.DSH_DEVELOPMENT_CONFIG, 'utf8'))
 const runtime = createRequire(process.env.DSH_CLI_RUNTIME_PACKAGE)
 const { LlmAdapter } = await import(pathToFileURL(runtime.resolve('@deepseek-ai/dsh-llm')).href)
@@ -18,8 +19,15 @@ export function apply(ctx) {
       const tools = request.messages.filter(message => message.role === 'tool')
       if (config.readFixture && tools.length) {
         const visible = tools.at(-1).content[0].text
-        const restored = visible.startsWith('[dsh-lossless-text:')
-          ? decodeLosslessText(visible.split('\n\nOriginal tool-result snapshot: ')[0]) : visible
+        let encoded = visible
+        const boundary = visible.indexOf('\n\nOriginal tool-result snapshot: ')
+        if (visible.startsWith('[dsh-lossless-text:') && boundary >= 0) {
+          const footer = visible.slice(boundary + 2)
+          const receipt = JSON.parse(footer.split('\n')[0].slice('Original tool-result snapshot: '.length))
+          if (footer !== formatSnapshotReference(receipt)) throw new Error('Unrecognized source-read footer')
+          encoded = visible.slice(0, boundary)
+        }
+        const restored = visible.startsWith('[dsh-lossless-text:') ? decodeLosslessText(encoded) : visible
         if (!restored.includes('UNIQUE_READ_FACT')) throw new Error('Model-visible read lacks required fact')
       }
       const block = tools.length

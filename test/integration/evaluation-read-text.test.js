@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
 import { runAgentFixture } from '../../scripts/evaluate-agent.js'
 import { decodeLosslessText } from '../../src/lossless-text.js'
 import { verifySnapshot } from '../../src/recovery.js'
+import { formatSnapshotReference } from '../../src/snapshot.js'
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const textOf = message => message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
@@ -13,7 +14,9 @@ const receiptOf = text => JSON.parse(text.match(/Original tool-result snapshot: 
 function decodeVisible(text) {
   if (!text.startsWith('[dsh-lossless-text:v1]')) return text
   const boundary = text.indexOf('\n\nOriginal tool-result snapshot: ')
-  assert.ok(boundary > 0)
+  if (boundary < 0) return decodeLosslessText(text)
+  const footer = text.slice(boundary + 2)
+  assert.equal(footer, formatSnapshotReference(receiptOf(text)))
   return decodeLosslessText(text.slice(0, boundary))
 }
 function visibleBody(text) {
@@ -86,19 +89,24 @@ function adapterFactory({ LlmAdapter }, observations) {
   }()
 }
 
-test('AgentLoop opt-in persists packed source reads, keeps both snapshots raw and preserves the primary pointer after editing', async () => {
-  const observed = { requests: [], persisted: [], tools: [] }
-  const result = await runAgentFixture(fixture(), 'plugin', { replay: true, readText: true, maxSteps: 8,
+for (const encodeArtifacts of [false, true]) test(`AgentLoop source reads and artifact opt-in=${encodeArtifacts} preserve snapshots and primary pointer`, async () => {
+  const observed = { requests: [], persisted: [], tools: [], recoveries: [] }
+  const result = await runAgentFixture(fixture(), 'plugin', { replay: true, readText: true, encodeArtifacts, maxSteps: 8,
     adapterFactory: options => adapterFactory(new Proxy(options, { get(target, key) {
       if (key !== 'LlmAdapter') throw new Error('Hidden runner evidence accessed')
       return target[key]
     } }), observed),
     configureContext(ctx) {
+      ctx.on('free-context/recovery', event => observed.recoveries.push(event))
       ctx.on('session/event', (_session, event) => {
         if (event.type === 'tool/result') observed.persisted.push(structuredClone(event))
       })
       ctx.on('tools/post-execute', async (exec, raw, next) => {
+        const artifactRead = ['own-snapshot-read', 'primary-snapshot-read'].includes(exec.callId)
+        const spill = join(exec.agent.session.header.cwd, 'spill')
+        const before = artifactRead ? (await readdir(spill, { recursive: true })).sort() : null
         const decision = await next()
+        if (artifactRead) assert.deepEqual((await readdir(spill, { recursive: true })).sort(), before)
         const output = decision.content ?? raw.content
         observed.tools.push({ id: exec.callId, raw: structuredClone(raw), decision: structuredClone(decision), output: structuredClone(output),
           classification: exec.name === 'read' ? await ctx.get('freeContextReadClassifier').classify(raw.value?.path) : undefined })
@@ -116,7 +124,7 @@ test('AgentLoop opt-in persists packed source reads, keeps both snapshots raw an
     classifications: observed.tools.map(({ id, classification }) => ({ id, classification })) }))
   assert.equal(result.snapshotRecovered, true)
   assert.equal(result.fileCorrect, true)
-  assert.deepEqual(result.configuration.readText, { enabled: true, classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 })
+  assert.deepEqual(result.configuration.readText, { enabled: true, classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, ...(encodeArtifacts ? { encodeArtifacts: true } : {}) })
   assert.deepEqual(result.readClassification.artifactRoots, [join(result.readClassification.sourceRoots[0], 'spill')])
   assert.equal(result.readClassification.artifactInventoryComplete, true)
   const source = observed.tools.find(row => row.id === 'source-read')
@@ -129,8 +137,20 @@ test('AgentLoop opt-in persists packed source reads, keeps both snapshots raw an
   assert.ok(result.modelCalls.some(call => call.visibleToolResults.some(visible => visible.callId === 'source-read' && visible.contentHash === hash(source.output))))
   for (const id of ['own-snapshot-read', 'primary-snapshot-read']) {
     const read = observed.tools.find(row => row.id === id)
-    assert.equal(Object.hasOwn(read.decision, 'content'), false)
-    assert.deepEqual(read.output, read.raw.content)
+    assert.equal(Object.hasOwn(read.decision, 'value'), false)
+    if (encodeArtifacts) {
+      assert.match(read.output[0].text, /^\[dsh-lossless-text:v1\]/)
+      assert.equal(read.output[0].text.includes('\n\nOriginal tool-result snapshot: '), false)
+      assert.equal(decodeLosslessText(read.output[0].text), read.raw.content[0].text)
+      assert.deepEqual(observed.persisted.find(event => event.data.message.toolCallId === id).data.message.content, read.output)
+      assert.ok(result.modelCalls.some(call => call.visibleToolResults.some(visible => visible.callId === id && visible.contentHash === hash(read.output))))
+      const telemetry = observed.recoveries.find(event => event.recoveryCallId === id)
+      assert.equal(telemetry.outcome, 'modified')
+      assert.equal(telemetry.verifiedFull, false)
+    } else {
+      assert.equal(Object.hasOwn(read.decision, 'content'), false)
+      assert.deepEqual(read.output, read.raw.content)
+    }
   }
   assert.equal(result.toolCalls.find(call => call.callId === 'source-read').readSnapshot, false)
   assert.equal(result.toolCalls.find(call => call.callId === 'own-snapshot-read').readSnapshot, false)
@@ -143,6 +163,7 @@ test('AgentLoop opt-in persists packed source reads, keeps both snapshots raw an
 test('readText is explicitly boolean and default configurations retain their existing shape', async () => {
   const task = { id: 'read-text-default', kind: 'text', text: 'value: 7', query: 'Call fixture and return JSON {"value":7}.', expected: { value: 7 } }
   await assert.rejects(runAgentFixture(task, 'plugin', { replay: true, readText: 'true' }), /readText must be a boolean/)
+  for (const settings of [{ encodeArtifacts: true }, { readText: true, encodeArtifacts: 'true' }]) await assert.rejects(runAgentFixture(task, 'plugin', { replay: true, ...settings }), /encodeArtifacts/)
   const adapter = ({ LlmAdapter }) => new class extends LlmAdapter {
     async resolveModel(provider, model) { return { provider, id: model, name: model } }
     async *stream(request) {
@@ -155,11 +176,11 @@ test('readText is explicitly boolean and default configurations retain their exi
       yield { type: 'finish', reason: { kind: visible ? 'stop' : 'tool-calls' } }
     }
   }()
-  for (const readText of [undefined, false, true]) {
-    const result = await runAgentFixture(task, 'baseline-tuned', { replay: true, adapterFactory: adapter, ...(readText === undefined ? {} : { readText }) })
+  for (const [readText, encodeArtifacts] of [[undefined, false], [false, false], [true, false], [true, true]]) {
+    const result = await runAgentFixture(task, 'baseline-tuned', { replay: true, adapterFactory: adapter, encodeArtifacts, ...(readText === undefined ? {} : { readText }) })
     assert.equal(result.passed, true)
     assert.equal(Object.hasOwn(result.configuration, 'readText'), readText === true)
     assert.equal(Object.hasOwn(result, 'readClassification'), false)
-    if (readText === true) assert.deepEqual(result.configuration.readText, { enabled: false, classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 })
+    if (readText === true) assert.deepEqual(result.configuration.readText, { enabled: false, classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, ...(encodeArtifacts ? { encodeArtifacts: false } : {}) })
   }
 })

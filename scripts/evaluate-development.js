@@ -98,9 +98,9 @@ export function buildDevelopmentProfile(config) {
   return lines.join('\n') + '\n'
 }
 
-export async function runDevelopmentTask(fixtureId, group, { directory, replay = true, readText = false, key, pricing: inputPricing, model: inputModel,
+export async function runDevelopmentTask(fixtureId, group, { directory, replay = true, readText = false, encodeArtifacts = false, key, pricing: inputPricing, model: inputModel,
   runtimeRoot = process.env.DSH_CLI_RUNTIME_ROOT ?? '.omx/cli-runtime', maxSteps = 12, maxCalls = 16, timeoutMs = 90000, maxCostUSD = .05, onPlan, onResult } = {}) {
-  if (!groups.includes(group) || typeof replay !== 'boolean' || typeof readText !== 'boolean' || !isAbsolute(directory ?? '')) throw new TypeError('Explicit group, mode and absolute new directory required')
+  if (!groups.includes(group) || typeof replay !== 'boolean' || typeof readText !== 'boolean' || typeof encodeArtifacts !== 'boolean' || encodeArtifacts && !readText || !isAbsolute(directory ?? '')) throw new TypeError('Explicit group, mode and absolute new directory required')
   const root = join(await realpath(dirname(resolve(directory))), basename(resolve(directory)))
   const repositoryRoot = await realpath(repository)
   if (root === repositoryRoot || root.startsWith(repositoryRoot + sep)) throw new TypeError('Development workspace must be outside the repository')
@@ -121,7 +121,7 @@ export async function runDevelopmentTask(fixtureId, group, { directory, replay =
     sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'), runtimePackage: join(runtime, 'package.json'),
     testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
     ...(replay ? { replayProvider: fileURLToPath(new URL('./development-replay-provider.js', import.meta.url)), controlSource: fileURLToPath(new URL('../test/fixtures/development/json-output-limit/control/json-codec.js', import.meta.url)) } : {}) }
-  if (readText) config.readText = { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 }
+  if (readText) config.readText = { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, ...(encodeArtifacts ? { encodeArtifacts: group === 'plugin' } : {}) }
   await mkdir(config.spill, { mode: 0o700 })
   const patch = buildDevelopmentProfile(config)
   const plan = { version: 'development-task-v1', fixtureId, fixtureManifestHash: fixture.manifestHash, byteBudgetValidation: fixture.byteBudgetValidation, configuration: config, timeoutMs, shutdownGraceMs: 6000,

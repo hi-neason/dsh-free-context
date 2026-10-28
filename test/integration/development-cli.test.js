@@ -144,8 +144,8 @@ test('actual CLI source read packing is opt-in and preserves final Session/model
   const base = await realpath(await mkdtemp(join(tmpdir(), 'dsh-cli-read-packing-')))
   t.after(() => rm(base, { recursive: true, force: true }))
   const source = ('Repeated diagnostic preamble with exact spaces and punctuation. '.repeat(5) + '\n').repeat(70) + 'UNIQUE_READ_FACT 中文😀\n'
-  let original
-  for (const [label, enabled, plugin, artifact] of [['off', false, true, false], ['source', true, true, false], ['baseline', false, false, false], ['artifact', true, true, true]]) {
+  let original, originalArtifact
+  for (const [label, enabled, plugin, artifact] of [['off', false, true, false], ['source', true, true, false], ['baseline', false, false, false], ['artifact', true, true, true], ['artifact-encoded', true, true, true]]) {
     const root = join(base, label), home = join(root, 'home'), spill = join(root, 'spill')
     await mkdir(join(home, 'profiles/headless'), { recursive: true })
     await mkdir(spill, { mode: 0o700 })
@@ -153,7 +153,7 @@ test('actual CLI source read packing is opt-in and preserves final Session/model
     await writeFile(join(root, readFixture), source)
     await writeFile(join(home, 'profiles/headless/package.json'), JSON.stringify({ private: true, dependencies: {}, dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless'] } } }))
     const config = { replay: true, model: 'scripted', plugin, tools: ['read'], maxInlineTokens: 12500, workspace: root, sessions: join(home, 'sessions'), spill, ledger: join(root, 'ledger.jsonl'), readFixture,
-      ...(label !== 'off' ? { readText: { enabled, classifier: 'filesystem-host-v1', minimumSavingsRatio: .5 } } : {}),
+      ...(label !== 'off' ? { readText: { enabled, classifier: 'filesystem-host-v1', minimumSavingsRatio: .5, ...(label === 'artifact-encoded' ? { encodeArtifacts: true } : {}) } } : {}),
       replayProvider: fileURLToPath(new URL('../fixtures/development-transform-provider.js', import.meta.url)), maxSteps: 4, maxCalls: 4, maxCostUSD: 1, runtimePackage: join(runtimeRoot, 'package.json'), testCommands: [], manifestHash: `synthetic-read-${label}` }
     await writeFile(config.ledger, '')
     const observer = join(root, 'observer.json'), patch = join(root, 'patch.yml')
@@ -174,12 +174,18 @@ test('actual CLI source read packing is opt-in and preserves final Session/model
     assert.equal(output.contentHash, tool.contentHash)
     assert.equal(tool.valueHash, tool.finalValueHash)
     assert.ok(ledger.some(row => row.type === 'model/start' && row.visibleToolResults.some(value => value.callId === tool.callId && value.contentHash === output.contentHash)))
-    const selected = ledger.some(row => row.type === 'decision' && row.outcome === 'selected' && row.strategy === 'read-lossless-text-v1')
-    assert.equal(selected, label === 'source', JSON.stringify({ label, stderr: child.stderr, decisions: ledger.filter(row => row.type === 'decision'), bytes: input.bytes, prefix: saved[0].text.slice(0, 120) }))
+    const selected = ledger.some(row => row.type === 'decision' && row.outcome === 'selected' && row.strategy === (label === 'artifact-encoded' ? 'read-artifact-lossless-text-v1' : 'read-lossless-text-v1'))
+    assert.equal(selected, label === 'source' || label === 'artifact-encoded', JSON.stringify({ label, stderr: child.stderr, decisions: ledger.filter(row => row.type === 'decision'), bytes: input.bytes, prefix: saved[0].text.slice(0, 120) }))
     if (label === 'off') original = saved[0].text
+    if (label === 'artifact') originalArtifact = saved[0].text
     if (label === 'source') {
       assert.ok(output.bytes * 2 <= input.bytes)
       assert.equal(decodeLosslessText(saved[0].text.split('\n\nOriginal tool-result snapshot: ')[0]), original.replace(join(base, 'off/source.txt'), join(base, 'source/source.txt')))
+    } else if (label === 'artifact-encoded') {
+      assert.ok(output.bytes * 2 <= input.bytes)
+      assert.equal(saved[0].text.includes('\n\nOriginal tool-result snapshot: '), false)
+      assert.equal(decodeLosslessText(saved[0].text), originalArtifact.replace(join(base, 'artifact/spill/source.txt'), join(base, 'artifact-encoded/spill/source.txt')))
+      assert.deepEqual(await readdir(spill, { recursive: true }), ['source.txt'])
     } else assert.equal(input.contentHash, output.contentHash)
     assert.ok(rows.some(row => row.type === 'turn/end' && row.data.reason.kind === 'completed'))
   }

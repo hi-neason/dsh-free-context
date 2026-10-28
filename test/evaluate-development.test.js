@@ -85,3 +85,10 @@ test('malformed nested visibility metadata rejects completeness while retaining 
 test('development read packing option requires an explicit boolean', async () => {
   await assert.rejects(runDevelopmentTask('json-output-limit', 'plugin', { directory: '/tmp/not-created-development-read', readText: 'true' }), TypeError)
 })
+
+
+test('artifact read packing cannot start without explicit boolean read packing', async () => {
+  for (const settings of [{ encodeArtifacts: true }, { readText: true, encodeArtifacts: 'true' }]) {
+    await assert.rejects(runDevelopmentTask('json-output-limit', 'plugin', { directory: '/tmp/not-created-artifact-read', ...settings }), TypeError)
+  }
+})
