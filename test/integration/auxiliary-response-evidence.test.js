@@ -37,13 +37,17 @@ async function replay(texts, indexes) {
         for await (const chunk of next()) { if (request.model === config.model) observed.push(chunk); yield chunk }
       })())
     } })
-  assert.equal(row.passed, true, JSON.stringify({ failure: row.failure, stoppedReason: row.stoppedReason, phaseResults: row.phaseResults, experiments: row.experiments, calls: row.toolCalls }))
+  assert.equal(row.passed, !indexes, JSON.stringify({ failure: row.failure, stoppedReason: row.stoppedReason, phaseResults: row.phaseResults, experiments: row.experiments, calls: row.toolCalls }))
   assert.deepEqual(row.adoptions, [])
   assert.equal(row.experiments.length, 1)
   assert.notEqual(row.experiments[0].reason, 'selected')
   const auxiliary = row.modelCalls.filter(call => call.kind === 'auxiliary')
   assert.equal(auxiliary.length, 1)
   if (indexes) {
+    assert.equal(row.stoppedReason, 'incomplete-model-usage')
+    assert.equal(row.modelCalls.length, 2)
+    assert.equal(row.feedback.length, 0)
+    assert.equal(row.cleanup.complete, true)
     assert.equal(auxiliary[0].finish, null)
     assert.equal(auxiliary[0].complete, false)
     assert.equal(row.usageComplete, false)

@@ -166,6 +166,13 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
   let phaseIndex = 0
   let steps = 0
   let stoppedReason
+  const stopForIncompleteUsage = () => {
+    // complete is assigned only when the stream's finally block has ended.
+    // An in-flight record has no complete field and must not trip this gate.
+    if (!modelCalls.some(call => call.complete === false)) return false
+    stoppedReason = 'incomplete-model-usage'
+    return true
+  }
   let outcome
   let snapshotPath
   let delivered = ''
@@ -200,7 +207,10 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
             } else observed.omitted = true
           }
           if (chunk.type === 'usage') record.usage = chunk.usage
-          if (chunk.type === 'finish') record.finish = chunk.reason.kind
+          if (chunk.type === 'finish') {
+            record.finish = chunk.reason.kind
+            if (chunk.reason.kind === 'error' && chunk.reason.failure) record.failure = safeFailure(chunk.reason.failure)
+          }
           yield chunk
         }
       } finally {
@@ -278,6 +288,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     await configureContext?.(ctx)
     const harness = await mountAgentLoopTestHarness(ctx)
     ctx.on('agent/pre-step', async (_payload, next) => {
+      if (stopForIncompleteUsage()) throw new Error('Evaluation model usage incomplete')
       if (++steps > maxSteps) { stoppedReason = 'max-steps'; throw new Error('Evaluation step limit') }
       return next()
     })
@@ -290,6 +301,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
         const eventBoundary = agent.session.snapshotEvents().length
         agent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }))
         await agent.whenIdle()
+        stopForIncompleteUsage()
         const phaseEvents = agent.session.snapshotEvents().slice(eventBoundary)
         const turnCompleted = phaseEvents.filter(event => event.type === 'turn/end').at(-1)?.data.reason.kind === 'completed'
         const phaseMessages = phaseEvents.filter(event => event.type === 'assistant/message')

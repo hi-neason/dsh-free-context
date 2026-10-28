@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 const usageFields = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens']
 export function validUsage(usage) {
   return usage !== null && typeof usage === 'object' && usageFields.every((field, index) =>
@@ -29,9 +31,14 @@ export function priceUsage(usage, prices) {
 }
 /** Provider bodies and arbitrary exception strings are never evaluation evidence. */
 export function safeFailure(error) {
-  const codes = { EACCES: 'filesystem', EPERM: 'filesystem', ENOENT: 'filesystem', ENOSPC: 'filesystem', ETIMEDOUT: 'timeout', ABORTED: 'timeout', UNAUTHORIZED: 'auth', INVALID_API_KEY: 'auth', CONFIG_INVALID: 'configuration' }
+  const codes = { EACCES: 'filesystem', EPERM: 'filesystem', ENOENT: 'filesystem', ENOSPC: 'filesystem', ETIMEDOUT: 'timeout', ABORTED: 'timeout', UNAUTHORIZED: 'auth', INVALID_API_KEY: 'auth', CONFIG_INVALID: 'configuration',
+    TRANSPORT: 'transport', TIMEOUT: 'timeout', AUTH: 'auth', QUOTA: 'quota', RATE_LIMIT: 'rate-limit', SERVER: 'server', INVALID_REQUEST: 'request' }
   const names = { TimeoutError: 'timeout', AbortError: 'timeout', TypeError: 'configuration', SyntaxError: 'configuration' }
-  const code = Object.hasOwn(codes, error?.code) ? error.code : undefined
-  const name = Object.hasOwn(names, error?.name) ? error.name : undefined
-  return { category: code ? codes[code] : name ? names[name] : 'unknown', ...(code ? { code } : {}), ...(name ? { name } : {}) }
+  const code = typeof error?.code === 'string' && Object.hasOwn(codes, error.code) ? error.code : undefined
+  const name = typeof error?.name === 'string' && Object.hasOwn(names, error.name) ? error.name : undefined
+  const status = Number.isInteger(error?.status) && error.status >= 100 && error.status <= 599 ? error.status : undefined
+  const requestIdHash = typeof error?.requestId === 'string' && error.requestId.length > 0 && error.requestId.length <= 4096
+    ? createHash('sha256').update(error.requestId, 'utf8').digest('hex') : undefined
+  return { category: code ? codes[code] : name ? names[name] : 'unknown', ...(code ? { code } : {}), ...(name ? { name } : {}),
+    ...(status !== undefined ? { status } : {}), ...(requestIdHash ? { requestIdHash } : {}) }
 }
