@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { isEligibleInput } from './config.js'
 import { measureContent } from './diagnostics.js'
 import { decodeJsonRows, encodeJsonRows } from './json-codec.js'
-import { reduceNodeTap } from './log-reducer.js'
+import { reduceNodeTap, reduceNodeSpec } from './log-reducer.js'
 import { encodeLosslessText } from './lossless-text.js'
 import { waitForBoundary } from './async-boundary.js'
 import { archiveOriginal, formatSnapshotReference } from './snapshot.js'
@@ -81,7 +81,8 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
       }
     }
     if (!config.logs.enabled) return undefined
-    const draft = reduceNodeTap(block.text)
+    const tap = reduceNodeTap(block.text)
+    const draft = tap ?? reduceNodeSpec(block.text)
     if (!draft || !smaller([{ ...block, text: draft.text }])) return undefined
     return (async () => {
       // Even observe mode archives before constructing an actual recoverable candidate.
@@ -90,7 +91,7 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
       try { snapshot = onSnapshot(exec, receipt, 'original') } catch {}
       const replacement = [{ ...block, text: `${draft.text}\n\n${formatSnapshotReference(receipt)}` }]
       if (exec.signal?.aborted || !smaller(replacement)) return undefined
-      return { content: replacement, strategy: 'node-tap-v13', lossy: true, snapshots: snapshot ? [snapshot] : [] }
+      return { content: replacement, strategy: tap ? 'node-tap-v13' : 'node-spec-v1', lossy: true, snapshots: snapshot ? [snapshot] : [] }
     })()
   }
 }

@@ -62,3 +62,50 @@ export function reduceNodeTap(text) {
     retainedFailureCount: failures,
   }
 }
+
+/** Narrow flat Node spec reports. Success titles/durations are omitted; every
+ * failure status, diagnostic appendix and summary character remains available.
+ */
+export function reduceNodeSpec(text) {
+  if (typeof text !== 'string' || !text.isWellFormed() || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/.test(text) || instructionLike.test(text)) return undefined
+  const lines = (text.endsWith('\n') ? text.slice(0, -1) : text).split('\n')
+  const statusPattern = /^([✔✖]) (.+) \(((?:0|[1-9]\d*)(?:\.\d+)?)ms\)$/
+  const failed = []
+  let cursor = 0, successes = 0
+  while (statusPattern.test(lines[cursor] ?? '')) {
+    const line = lines[cursor++]
+    if (line.startsWith('✔ ')) successes++
+    else failed.push(line)
+  }
+  if (!successes) return undefined
+  const summaryStart = cursor
+  const summary = [`ℹ tests ${successes + failed.length}`, 'ℹ suites 0', `ℹ pass ${successes}`, `ℹ fail ${failed.length}`,
+    'ℹ cancelled 0', 'ℹ skipped 0', 'ℹ todo 0']
+  for (const line of summary) if (lines[cursor++] !== line) return undefined
+  const timing = lines[cursor++]
+  if (!timing?.startsWith('ℹ duration_ms ') || !duration.test(timing.slice(14))) return undefined
+  const summaryEnd = cursor
+  if (failed.length) {
+    if (lines[cursor++] !== '' || lines[cursor++] !== '✖ failing tests:' || lines[cursor++] !== '') return undefined
+    for (const status of failed) {
+      if (!/^test at .+:[1-9]\d*:[1-9]\d*$/.test(lines[cursor++] ?? '') || lines[cursor++] !== status) return undefined
+      let diagnosticLines = 0
+      while (cursor < lines.length && (lines[cursor] === '' || lines[cursor].startsWith('  '))) {
+        if (lines[cursor].trim()) diagnosticLines++
+        cursor++
+      }
+      if (!diagnosticLines) return undefined
+    }
+    // The official bash tool appends this marker for a nonzero command exit.
+    // Keep it verbatim with the diagnostic appendix; never infer exit success.
+    if (/^\[exit code: [1-9]\d*\]$/.test(lines[cursor] ?? '')) cursor++
+  }
+  if (cursor !== lines.length) return undefined
+  const suffix = text.slice(lines.slice(0, summaryEnd).join('\n').length)
+  return {
+    text: [`[LOSSY Node spec preview: omitted ${successes} successful-test names and durations; retained ${failed.length} failure statuses, diagnostic appendix and summary. Retrieve the original snapshot for omitted evidence.]`,
+      ...failed, ...lines.slice(summaryStart, summaryEnd)].join('\n') + suffix,
+    omittedSuccessCount: successes,
+    retainedFailureCount: failed.length,
+  }
+}
