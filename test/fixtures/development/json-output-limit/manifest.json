@@ -1,0 +1,37 @@
+{
+  "id": "json-output-limit",
+  "originRepository": "hi-neason/dsh-free-context",
+  "oldCommit": "916fe21d7a2e6568f61fd417e6b3b39eb2c89529",
+  "fixedCommit": "bbedaa5ee3234c06c2a32be487cd9548cc49750d",
+  "allowedEditPaths": [
+    "src/json-codec.js"
+  ],
+  "testCommand": [
+    "--test",
+    "--test-reporter=tap",
+    "test/json-codec.test.js"
+  ],
+  "expectedTests": 9,
+  "files": {
+    "workspace/src/json-codec.js": {
+      "sha256": "d067be58ea8ef39d0de121a06bf2406d064c133b7db5809c7860d3a3d09217b2",
+      "gitBlob": "35176feaa965637098bda6e5fe07f9f4a9ae4f6a"
+    },
+    "workspace/test/json-codec.test.js": {
+      "sha256": "81bdc17466bb26dfc15157101180e10f51e1965da663986299f226ae5c2adf7f",
+      "gitBlob": "d2883d2b66f8139f5286ac71d6d1fa26ab79a527"
+    },
+    "workspace/package.json": {
+      "sha256": "3acde5036abb03bf818878124f9dcd72967dd580e0657a50e4de3fc5abd17b24",
+      "gitBlob": "08a091e12bca42c99d064050be6cf39435f4aec7"
+    },
+    "workspace/LICENSE": {
+      "sha256": "6f29c0abb2afd34d7b49433c4819d41f56e883732211261a1c39db0ab7989201",
+      "gitBlob": "ad16f399f8939cfdbd246fbbbd0014020e376505"
+    },
+    "control/json-codec.js": {
+      "sha256": "c6a74107446438da0f612e9f24a822ab9fccb1df3027d3dcd56f589747825f5b",
+      "gitBlob": "6ac31e4d36cab03348b306f059b03590611f6df8"
+    }
+  }
+}

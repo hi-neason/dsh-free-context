@@ -1,0 +1,27 @@
+{
+  "name": "dsh-free-context",
+  "version": "0.1.0",
+  "description": "Context efficiency plugin for DeepSeek Harness",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./json": "./src/json-codec.js",
+    "./snapshot": "./src/snapshot.js",
+    "./read-lifecycle": "./src/read-lifecycle.js",
+    "./economics": "./src/economics.js",
+    "./retirement": "./src/retirement.js",
+    "./experiments": "./src/experiments.js",
+    "./text-selection": "./src/text-selection.js"
+  },
+  "files": ["src", "README.md", "LICENSE"],
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node scripts/check.js",
+    "test:integration": "node --test test/integration/*.test.js",
+    "evaluate": "node scripts/evaluate.js",
+    "evaluate:agent": "node scripts/evaluate-agent.js",
+    "evaluate:live": "node scripts/evaluate-live.js"
+  },
+  "license": "MIT"
+}
