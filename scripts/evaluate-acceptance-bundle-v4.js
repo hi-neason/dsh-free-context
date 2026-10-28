@@ -139,7 +139,7 @@ export async function evaluateAcceptanceBundleV4({ rootDir, bundleId, seed = 202
       if (!key) stop('credential-read-failed')
     }
     const agentOptions = policy => ({ key: replay ? undefined : key, model: plan.inputs.provenance.model, replay, prices: plan.inputs.pricing,
-      historyRetirement: policy, maxSteps: 12, timeoutMs: 120000, composeWithTunedNative: true, validationFeedbackLimit: 2, readText: true,
+      historyRetirement: policy, maxSteps: 12, timeoutMs: 120000, composeWithTunedNative: true, validationFeedbackLimit: 2, readText: true, encodeArtifacts: true,
       adapterFactory: replay ? retirementDiscoveryAdapter : undefined })
     for (const scheduled of plan.calibration.runs) {
       const report = { evaluationKind: replay ? 'history-retirement-agent-replay' : 'history-retirement-live-agent', runId: scheduled.runId,
@@ -207,7 +207,7 @@ export async function evaluateAcceptanceBundleV4({ rootDir, bundleId, seed = 202
       if (benchmarkReport.stoppedReason) stop(benchmarkReport.stoppedReason)
     } catch (error) { stop(stoppedReason ?? (error instanceof BundleStop ? error.reason : 'benchmark-exception')) }
     try {
-      developmentReport = await evaluateDevelopmentStudy({ directory: plan.developmentPlan.directory, runtimeRoot: cliRoot, replay, readText: plan.developmentPlan.readText,
+      developmentReport = await evaluateDevelopmentStudy({ directory: plan.developmentPlan.directory, runtimeRoot: cliRoot, replay, readText: plan.developmentPlan.readText, encodeArtifacts: plan.developmentPlan.encodeArtifacts,
         key: replay ? undefined : key, pricing: plan.inputs.pricing, maxTotalCostUSD: plan.inputs.maxTotalCostUSD,
         maxTotalCalls: plan.developmentPlan.maxTotalCalls, ...plan.developmentPlan.taskBudget, maxTaskCostUSD: plan.developmentPlan.taskBudget.maxCostUSD,
         async onPlan(child) {

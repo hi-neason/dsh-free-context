@@ -25,7 +25,8 @@ export function runnerConfigurationScope(tasks) {
         !Number.isSafeInteger(config.validationFeedbackLimit) || config.validationFeedbackLimit < 0 || config.validationFeedbackLimit > 2 ||
         ['maxSteps', 'timeoutMs'].some(key => config[key] !== undefined && (!Number.isSafeInteger(config[key]) || config[key] < 1)) ||
         Object.hasOwn(config, 'readText') && !isDeepStrictEqual(config.readText,
-          { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 }) ||
+          { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5,
+            ...(Object.hasOwn(config.readText ?? {}, 'encodeArtifacts') ? { encodeArtifacts: group === 'plugin' } : {}) }) ||
         records.some(task => !isDeepStrictEqual(task.configuration, config))) return undefined
     scope.push({ group, configuration: structuredClone(config) })
   }

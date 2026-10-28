@@ -87,3 +87,17 @@ test('read policy is validated and changes the comparable calibration scope', ()
   revised[0].tasks[2].configuration.readText.classifier = 'incomplete-registry'
   assert.notEqual(calibrateRetirementReports(revised).status, 'calibrated')
 })
+
+test('artifact representation cannot share a calibration scope with source-only read encoding', () => {
+  const source = reports(), artifacts = reports()
+  for (const rows of [source, artifacts]) for (const report of rows) for (const task of report.tasks) task.configuration.readText = {
+    enabled: task.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5,
+    ...(rows === artifacts ? { encodeArtifacts: task.group === 'plugin' } : {}),
+  }
+  const first = calibrateRetirementReports(source), second = calibrateRetirementReports(artifacts)
+  assert.equal(first.status, 'calibrated')
+  assert.equal(second.status, 'calibrated')
+  assert.notEqual(first.scope, second.scope)
+  artifacts[0].tasks[0].configuration.readText.encodeArtifacts = true
+  assert.notEqual(calibrateRetirementReports(artifacts).status, 'calibrated')
+})

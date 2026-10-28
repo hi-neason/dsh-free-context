@@ -7,6 +7,8 @@ import { createAcceptancePlanV3 } from '../scripts/acceptance-benchmark-v3.js'
 import { acceptanceFixturesV3 } from './fixtures/acceptance/tasks-v3.js'
 import { acceptanceFixturesV4 } from './fixtures/acceptance/tasks-v4.js'
 import { encodeLosslessText } from '../src/lossless-text.js'
+import { formatSnapshotReference } from '../src/snapshot.js'
+import { createHash } from 'node:crypto'
 
 // Synthetic ledger contract tests: no real provider or savings evidence.
 const pricing = { currency: 'USD', model: 'model', verifiedDate: '2026-10-27', ratePeriod: 'test', sourceUrl: 'https://example.test/prices', uncached: 1, cacheRead: .1, cacheWrite: 0, output: 1 }
@@ -21,8 +23,8 @@ function records(plan) {
       turnEnds: [{ kind: 'completed' }], replay: false, usageKind: 'provider-reported', usageComplete: true, usage,
       modelCalls: [{ kind: 'agent', complete: true, provider: 'deepseek-official', model: 'model', usage: { ...usage } }],
       configuration: { maxInlineTokens: run.group === 'baseline-default' ? 12500 : 1200, plugin: run.group === 'plugin', nativePolicyInstalledAfterPlugin: true,
-        validationFeedbackLimit: 2, maxSteps: 12, timeoutMs: 120000, readText: { enabled: run.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 } },
-      requestedProtocol: { readText: true, requireFixtureEachPhase: fixture.requireFixtureEachPhase === true, rejectPlaceholderValues: fixture.rejectPlaceholderValues === true,
+        validationFeedbackLimit: 2, maxSteps: 12, timeoutMs: 120000, readText: { enabled: run.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, encodeArtifacts: run.group === 'plugin' } },
+      requestedProtocol: { readText: true, encodeArtifacts: true, requireFixtureEachPhase: fixture.requireFixtureEachPhase === true, rejectPlaceholderValues: fixture.rejectPlaceholderValues === true,
         discoverSourcePath: fixture.discoverSourcePath === true, ptc: fixture.ptc === true,
         requireSnapshot: fixture.requireSnapshot === true, requireReadEachPhase: fixture.requireReadEachPhase === true,
         responseSchemas: (fixture.phases ?? [fixture]).map(phase => phase.responseSchema ?? fixture.responseSchema ?? null),
@@ -463,7 +465,7 @@ function evidence() {
   const assumptions = { minimumFutureRequests: 200 }
   const reports = [0, 1, 2].map(index => ({ evaluationKind: 'history-retirement-live-agent', completed: true, runId: `run-${index}`, model: 'model', provenance,
     fixture, fixtureHash: retirementEvidenceHash(fixture), assumptions, policyHash: retirementEvidenceHash(assumptions), tasks: ['baseline-default', 'baseline-tuned', 'plugin'].map(group => ({
-      group, configuration: { maxInlineTokens: group === 'baseline-default' ? 12500 : 1200, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: true, validationFeedbackLimit: 2, maxSteps: 12, timeoutMs: 120000, readText: { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 } }, task: fixture.id, startedAt: `run-${index}`, steps: 2, replay: false, passed: true, usageKind: 'provider-reported', usageComplete: true, attempts: 0, pricing, historyRetirement: assumptions,
+      group, configuration: { maxInlineTokens: group === 'baseline-default' ? 12500 : 1200, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: true, validationFeedbackLimit: 2, maxSteps: 12, timeoutMs: 120000, readText: { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, encodeArtifacts: group === 'plugin' } }, task: fixture.id, startedAt: `run-${index}`, steps: 2, replay: false, passed: true, usageKind: 'provider-reported', usageComplete: true, attempts: 0, pricing, historyRetirement: assumptions,
       phaseResults: [{ actual: fixture.expected, passed: true, freshAnswer: true, turnCompleted: true }], turnEnds: [{ kind: 'completed' }],
       retirements: [{ reason: 'retired', beforeStep: 1, actualPostRetirementSteps: 2, economics: { minimumFutureRequests: 200, adopt: true, removedTokens: 1000, compressionCost: 0, expectedRecoveryCost: 0, cacheRebuildCost: .0001, safetyMargin: .25 } }],
       toolCalls: [{ name: 'fixture', isError: false }, { callId: 'read-1', phase: 0, name: 'read', readSnapshot: true, isError: false }],
@@ -579,20 +581,30 @@ test('prospective read policy is pinned and missing or changed configuration fai
   assert.equal(summarizeAcceptanceV4(old, records(old), options).planValid, false)
 })
 
-test('v4 replay decodes only verified model-visible lossless frames and refuses tampering', async () => {
+test('v4 replay strictly decodes both standalone and receipt-wrapped visible frames', async () => {
   const fixture = acceptanceFixturesV4().find(task => task.id === 'experiment-query-dependent')
   const encoded = encodeLosslessText(fixture.text)
   assert.ok(encoded)
-  const messages = [{ role: 'tool', content: [{ type: 'text', text: `${encoded}\n\nOriginal tool-result snapshot: {}` }] }]
-  const adapter = acceptanceReplayAdapterV4({ LlmAdapter: class {}, fixture, source: '/fixture', snapshotPath: () => undefined,
-    delivered: () => { throw Error('hidden source') }, phase: () => 0 })
-  const stream = async request => { const blocks = []; for await (const chunk of adapter.stream(request)) if (chunk.type === 'block-end') blocks.push(chunk.block); return blocks }
-  await stream({ model: 'agent', messages: [] })
-  await stream({ model: 'agent', messages: [] })
-  const answer = (await stream({ model: 'agent', messages }))[0]
-  assert.deepEqual(JSON.parse(answer.text), fixture.phases[0].expected)
-  messages[0].content[0].text = messages[0].content[0].text.replace('"bytes":', '"bytes":0,"other":')
-  await assert.rejects(stream({ model: 'agent', messages }), /Invalid/)
+  const receipt = { sessionId: 'session', callId: 'read-call', toolName: 'read', sha256: createHash('sha256').update(fixture.text).digest('hex'), bytes: Buffer.byteLength(fixture.text), locator: '/fixture-render-snapshot', retrievalHint: 'Read exact saved text.' }
+  const footer = formatSnapshotReference(receipt)
+  for (const visible of [encoded, `${encoded}\n\n${footer}`]) {
+    const messages = [{ role: 'tool', content: [{ type: 'text', text: visible }] }]
+    const adapter = acceptanceReplayAdapterV4({ LlmAdapter: class {}, fixture, source: '/fixture', snapshotPath: () => undefined,
+      delivered: () => { throw Error('hidden source') }, phase: () => 0 })
+    const stream = async request => { const blocks = []; for await (const chunk of adapter.stream(request)) if (chunk.type === 'block-end') blocks.push(chunk.block); return blocks }
+    await stream({ model: 'agent', messages: [] })
+    await stream({ model: 'agent', messages: [] })
+    const answer = (await stream({ model: 'agent', messages }))[0]
+    assert.deepEqual(JSON.parse(answer.text), fixture.phases[0].expected)
+    for (const invalid of [encoded + '\n', encoded + ' unknown suffix', encoded.replace('"bytes":', '"bytes":0,"other":'),
+      `${encoded}\n\nOriginal tool-result snapshot: NOT_JSON\nUNRECOGNIZED TRAILER`,
+      `${encoded}\n\nOriginal tool-result snapshot: {}\nUNRECOGNIZED TRAILER`,
+      `${encoded}\n\n${footer}\nUNRECOGNIZED TRAILER`,
+      `${encoded}\n\n${formatSnapshotReference({ ...receipt, sha256: '0'.repeat(64) })}`]) {
+      messages[0].content[0].text = invalid
+      await assert.rejects(stream({ model: 'agent', messages }))
+    }
+  }
 })
 
 test('read encoding adoption cannot replace any of the three auxiliary model-selection adoptions', () => {
@@ -604,5 +616,23 @@ test('read encoding adoption cannot replace any of the three auxiliary model-sel
     const summary = summarizeAcceptanceV4(plan, rows, options)
     assert.equal(summary.experimentalModesAccepted, false)
     assert.equal(summary.accepted, false)
+  }
+})
+
+test('artifact representation is a new prospective policy and rejects frozen source-only evidence', () => {
+  const current = createAcceptancePlanV4()
+  assert.equal(current.encodeArtifacts, true)
+  const prior = structuredClone(current)
+  delete prior.encodeArtifacts
+  delete prior.manifestHash
+  prior.manifestHash = retirementEvidenceHash(prior)
+  assert.equal(prior.manifestHash, '7132fc47177d31d6a92842d34e0767540fdc077df2c7e0c856540eeb55bd4626')
+  assert.equal(summarizeAcceptanceV4(prior, records(prior), options).planValid, false)
+  for (const change of [row => { delete row.configuration.readText.encodeArtifacts },
+    row => { row.configuration.readText.encodeArtifacts = false },
+    row => { row.requestedProtocol.encodeArtifacts = false }]) {
+    const rows = records(current)
+    change(rows.find(row => row.group === 'plugin'))
+    assert.equal(summarizeAcceptanceV4(current, rows, options).configurationComplete, false)
   }
 })

@@ -61,6 +61,7 @@ test('pre-discovery v4 manifests cannot be mixed into the revised protocol', () 
   const prior = structuredClone(revised)
   // Reconstruct the historical protocol, including its original response cap.
   prior.experimentSettings.maxOutputTokens = 120
+  delete prior.encodeArtifacts
   delete prior.readText
   for (const task of prior.tasks.filter(task => task.historyRetirement)) delete task.discoverSourcePath
   delete prior.manifestHash

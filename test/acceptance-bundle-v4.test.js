@@ -30,8 +30,8 @@ function benchmarkRecords(plan) {
       turnEnds: [{ kind: 'completed' }], replay: false, usageKind: 'provider-reported', usageComplete: true, usage,
       modelCalls: [{ id: 1, agentStep: 1, finish: 'stop', kind: 'agent', complete: true, provider: 'deepseek-official', model: 'model', usage: { ...usage } }],
       configuration: { maxInlineTokens: run.group === 'baseline-default' ? 12500 : 1200, plugin: run.group === 'plugin', nativePolicyInstalledAfterPlugin: true,
-        validationFeedbackLimit: 2, maxSteps: 12, timeoutMs: 120000, readText: { enabled: run.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 } },
-      requestedProtocol: { readText: true, requireFixtureEachPhase: fixture.requireFixtureEachPhase === true, rejectPlaceholderValues: fixture.rejectPlaceholderValues === true,
+        validationFeedbackLimit: 2, maxSteps: 12, timeoutMs: 120000, readText: { enabled: run.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, encodeArtifacts: run.group === 'plugin' } },
+      requestedProtocol: { readText: true, encodeArtifacts: true, requireFixtureEachPhase: fixture.requireFixtureEachPhase === true, rejectPlaceholderValues: fixture.rejectPlaceholderValues === true,
         discoverSourcePath: fixture.discoverSourcePath === true, ptc: fixture.ptc === true,
         requireSnapshot: fixture.requireSnapshot === true, requireReadEachPhase: fixture.requireReadEachPhase === true,
         responseSchemas: (fixture.phases ?? [fixture]).map(phase => phase.responseSchema ?? fixture.responseSchema ?? null),
@@ -53,7 +53,7 @@ function recordsFor(plan, { adopted = true, pluginCounts = [10, 10, 10] } = {}) 
       sessions: join(home, 'sessions'), spill: join(root, 'spill'), ledger: join(root, 'ledger.jsonl'), runtimePackage: join(plan.runtimeRoot, 'package.json'),
       testCommands: ['node --test test/json-codec.test.js', 'node --test --test-reporter=tap test/json-codec.test.js'],
       ...(plan.replay ? { replayProvider: join(repository, 'scripts/development-replay-provider.js'), controlSource: join(repository, 'test/fixtures/development/json-output-limit/control/json-codec.js') } : {}) }
-    if (plan.readText) config.readText = { enabled: run.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 }
+    if (plan.readText) config.readText = { enabled: run.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, ...(plan.encodeArtifacts ? { encodeArtifacts: run.group === 'plugin' } : {}) }
     const task = { version: 'development-task-v1', fixtureId: plan.fixtureId, fixtureManifestHash: plan.fixtureManifestHash, byteBudgetValidation: { version: 'json-output-utf8-v1', cases: 82, validatorHash: plan.fixtureValidationHash }, configuration: config, timeoutMs: plan.taskBudget.timeoutMs,
       shutdownGraceMs: 6000, runtimeVersion: plan.runtimeVersion, runtimeLockHash: plan.runtimeLockHash, sourceTreeHash: plan.sourceTreeHash, patchHash: hash(buildDevelopmentProfile(config)) }
     const taskPlan = { ...task, manifestHash: digest(task) }
@@ -83,7 +83,7 @@ function recordsFor(plan, { adopted = true, pluginCounts = [10, 10, 10] } = {}) 
 
 
 const usage = inputTokens => ({ inputTokens, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 })
-const config = group => ({ maxInlineTokens: group === 'baseline-default' ? 12500 : 1200, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: true, validationFeedbackLimit: 2, maxSteps: 12, timeoutMs: 120000, readText: { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 } })
+const config = group => ({ maxInlineTokens: group === 'baseline-default' ? 12500 : 1200, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: true, validationFeedbackLimit: 2, maxSteps: 12, timeoutMs: 120000, readText: { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, encodeArtifacts: group === 'plugin' } })
 function calibrationRows(plan, run) {
   return run.groups.map(group => {
     const steps = group === 'plugin' ? 4 : 3

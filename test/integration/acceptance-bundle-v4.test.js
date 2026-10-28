@@ -28,11 +28,13 @@ test('full 138-slot official AgentLoop and real CLI replay journals immutable so
       assert.ok(Object.isFrozen(plan.inputs.runtimes.agent))
       assert.equal(plan.benchmarkPlan.readText, true)
       assert.equal(plan.developmentPlan.readText, true)
+      assert.equal(plan.benchmarkPlan.encodeArtifacts, true)
+      assert.equal(plan.developmentPlan.encodeArtifacts, true)
     },
     async onResult(row, slot, plan) {
       results++
       const configuration = slot.kind === 'development' ? row.taskPlan.configuration : row.configuration
-      assert.deepEqual(configuration.readText, { enabled: slot.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 })
+      assert.deepEqual(configuration.readText, { enabled: slot.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, encodeArtifacts: slot.group === 'plugin' })
       if (slot.kind !== 'development' && slot.group === 'plugin') {
         assert.equal(row.readClassification.artifactInventoryComplete, true)
         assert.equal(row.readClassification.artifactRoots[0], join(row.readClassification.sourceRoots[0], 'spill'))
