@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
+import { verifySnapshot } from '../../src/recovery.js'
+import { snapshotReferenceId } from '../../src/snapshot.js'
 import * as experiments from '../../src/experiments.js'
 
 const runtime = createRequire(resolve(process.env.DSH_RUNTIME_ROOT ?? '.omx/integration-runtime', 'package.json'))
@@ -63,8 +65,32 @@ for (const [count, cap] of [[30, 2500], [250, 3000]]) test(`official spill ${cap
   const headersVisible = [...visible.matchAll(/src\/file\d+\.ts:1:2: error TS2322:/g)].length
   assert.ok(headersVisible > 0 && headersVisible < count, `expected a proper preview subset, received ${headersVisible}`)
   assert.ok(visible.includes(`"compilerHeaders":${count}`))
-  assert.match(visible, /"stage":"validated-selection-before-downstream-retention"/)
+  assert.match(visible, /BEFORE downstream retention/)
+  assert.match(visible, /supported grammar only, not semantic completeness/)
   assert.match(visible, /NOT final inline coverage/)
   assert.match(visible, /recover the full spilled tool output/)
-  assert.match(visible, /original snapshot for source-completeness checks/)
+  assert.match(visible, /recover the original for missing evidence, completeness checks/)
+  // The preview retains compact receipts; verify the complete persisted audit
+  // instead of treating pre-retention coverage as final inline coverage.
+  const receipts = visible.split('\n').filter(line => line.startsWith('Original tool-result snapshot: '))
+    .map(line => JSON.parse(line.slice('Original tool-result snapshot: '.length)))
+  assert.equal(receipts.length, 2)
+  const stored = await Promise.all(receipts.map(async receipt => {
+    assert.ok(visible.includes(`Snapshot referenceId: ${snapshotReferenceId(receipt)}.`))
+    const bytes = await readFile(receipt.locator)
+    assert.equal(verifySnapshot(receipt, bytes), true)
+    return bytes.toString('utf8')
+  }))
+  assert.equal(stored[0], text)
+  const manifest = JSON.parse(stored[1])
+  assert.deepEqual(manifest.originalReceipt, receipts[0])
+  assert.equal(manifest.sourceHash, receipts[0].sha256)
+  assert.equal(manifest.coverage.sourceHash, receipts[0].sha256)
+  assert.equal(manifest.coverage.stage, 'validated-selection-before-downstream-retention')
+  assert.deepEqual(manifest.coverage.scanned, { compilerHeaders: count, statusBlocks: 1 })
+  assert.deepEqual(manifest.coverage.retained, manifest.coverage.scanned)
+  assert.equal(manifest.selectedSpans.length, count + 1)
+  assert.ok(manifest.audit.request.messages[0].content[0].text.includes('src/file0.ts'))
+  assert.deepEqual(JSON.parse(manifest.audit.response[0].text).selectedIds, manifest.selectedSpans.map(span => span.id))
+  assert.equal(manifest.callUsage.inputTokens, 10)
 })

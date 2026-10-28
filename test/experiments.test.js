@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import * as plugin from 'dsh-free-context/experiments'
-import { formatSnapshotReference } from '../src/snapshot.js'
+import { createHash } from 'node:crypto'
+import { recoverSnapshot } from '../src/recovery.js'
+import { formatSnapshotReference, snapshotReferenceId } from '../src/snapshot.js'
 import { parseExperimentConfig } from '../src/experiment-config.js'
 
 const text = Array.from({ length: 40 }, (_, i) => `Paragraph ${i} explains general background in ordinary prose. ${'This sentence provides further descriptive context. '.repeat(10)}`).join('\n\n')
@@ -436,6 +438,9 @@ test('compiler coverage is source-bound, rendered with lossy guidance, archived 
   assert.match(output.content[0].text, /LOSSY/)
   assert.match(output.content[0].text, /recover the original for missing evidence, completeness checks/)
   const coverage = JSON.parse(f.saves[1].content).coverage
+  assert.equal(output.content[0].text.includes(JSON.stringify(coverage)), false)
+  assert.ok(output.content[0].text.includes(JSON.stringify(coverage.scanned)))
+  assert.ok(output.content[0].text.includes(JSON.stringify(coverage.retained)))
   assert.equal(coverage.stage, 'validated-selection-before-downstream-retention')
   assert.match(output.content[0].text, /NOT final inline coverage/)
   assert.match(output.content[0].text, /recover the full spilled tool output/)
@@ -457,7 +462,7 @@ test('generic diagnostics never render compiler coverage', async () => {
   assert.equal(JSON.parse(f.saves[1].content).coverage, undefined)
 })
 
-test('only audit reference omits duplicate prose while both receipts and recovery IDs remain intact', async () => {
+test('compact shared recovery guidance preserves both receipts, exact paged recovery and audit records', async () => {
   const f = setup()
   const output = await f.handler(execution(), result(), async () => ({ kind: 'accept' }))
   const text = output.content[0].text
@@ -471,9 +476,40 @@ test('only audit reference omits duplicate prose while both receipts and recover
     assert.equal(receipt.bytes, Buffer.byteLength(f.saves[index].content))
     assert.equal(receipt.retrievalHint, 'Use exact snapshot.')
   }
-  assert.ok(text.includes(formatSnapshotReference(refs[0])))
+  assert.equal(text.includes(formatSnapshotReference(refs[0])), false)
+  const manifest = JSON.parse(f.saves[1].content)
+  assert.deepEqual(refs[0], manifest.originalReceipt)
+  for (const [index, receipt] of refs.entries()) {
+    const bytes = Buffer.from(f.saves[index].content)
+    assert.deepEqual(receipt, { sessionId: 'session-1', callId: 'call-1', toolName: 'read',
+      locator: `spill://fixture/${index + 1}`, retrievalHint: 'Use exact snapshot.',
+      bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') })
+    assert.ok(text.includes(`Snapshot referenceId: ${snapshotReferenceId(receipt)}.`))
+    const recovered = await recoverSnapshot(receipt, async (locator, { offset, length }) => {
+      assert.equal(locator, receipt.locator)
+      return bytes.subarray(offset, offset + length)
+    }, { pageBytes: 127 })
+    assert.deepEqual(recovered, bytes)
+  }
+  const selected = manifest.selectedSpans.map(span => `[Source paragraph ${span.id}; UTF-16 ${span.start}:${span.end}]\n${f.saves[0].content.slice(span.start, span.end)}`).join('\n\n')
+  assert.ok(text.includes(selected))
+  const previous = [`[LOSSY paragraph selection; policy ${manifest.policy}. Extracted source spans do not prove complete evidence.]`, selected,
+    'The retained excerpts quote the source verbatim. Answer from them when sufficient; recover the original for missing evidence, completeness checks, or requested verification.',
+    formatSnapshotReference(refs[0]), 'Auxiliary selection audit manifest (full request, response and usage):',
+    formatSnapshotReference(refs[1], { includeGuidance: false })].join('\n\n')
+  assert.ok(Buffer.byteLength(previous) - Buffer.byteLength(text) > 200)
+  assert.ok(manifest.audit.request.messages[0].content[0].text.includes(f.saves[0].content.split('\n\n')[0]))
+  assert.equal(manifest.audit.response[0].text, '{"selectedIds":["p1"]}')
+  assert.equal(manifest.callUsage.inputTokens, 100)
+  assert.match(text, /free_context_recall/)
+  assert.match(text, /UTF-8 bytes and SHA-256/)
+  assert.match(text, /all pages/)
+  assert.match(text, /not the current source file/)
+  assert.match(text, /Partial reads.*do not verify/)
+  assert.match(formatSnapshotReference(refs[0]), /For full recovery, verify/)
+
   assert.ok(text.endsWith(formatSnapshotReference(refs[1], { includeGuidance: false })))
-  assert.equal(text.split('For full recovery, verify').length - 1, 1)
+  assert.equal(text.split('free_context_recall').length - 1, 1)
   const compact = formatSnapshotReference(refs[1], { includeGuidance: false })
   const full = formatSnapshotReference(refs[1])
   assert.ok(Buffer.byteLength(full) - Buffer.byteLength(compact) > 400)

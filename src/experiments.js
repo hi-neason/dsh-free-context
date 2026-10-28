@@ -114,10 +114,10 @@ export function apply(ctx, input) {
       const auditReference = tracking.record(exec, manifestReceipt, 'audit')
       const text = [`[LOSSY ${config.selectionMode === 'diagnostic-evidence' ? 'diagnostic evidence' : 'paragraph'} selection; policy ${selection.strategy}. Extracted source spans do not prove complete evidence.]`,
         selection.text,
-        ...(selection.coverage ? [`Compiler header coverage (supported grammar only, not semantic completeness): ${JSON.stringify(selection.coverage)} Counts describe the validated selection BEFORE downstream retention, NOT final inline coverage. A downstream preview may omit selected excerpts; recover the full spilled tool output for omitted excerpts, or the original snapshot for source-completeness checks.`] : []),
-        'The retained excerpts quote the source verbatim. Answer from them when sufficient; recover the original for missing evidence, completeness checks, or requested verification.',
-        formatSnapshotReference(originalReceipt),
-        'Auxiliary selection audit manifest (full request, response and usage):', formatSnapshotReference(manifestReceipt, { includeGuidance: false })].join('\n\n')
+        ...(selection.coverage ? [`Compiler header coverage (supported grammar only, not semantic completeness): scanned=${JSON.stringify(selection.coverage.scanned)}, retained=${JSON.stringify(selection.coverage.retained)} BEFORE downstream retention; NOT final inline coverage. For omitted excerpts recover the full spilled tool output; full coverage metadata is in the audit.`] : []),
+        'Verbatim excerpts: recover the original for missing evidence, completeness checks, or exact verification. Use registered IDs with free_context_recall if installed, otherwise retrievalHint/read/grep where supported. Read all pages; verify full UTF-8 bytes and SHA-256 against the receipt, not the current source file. Partial reads/grep do not verify completeness.',
+        formatSnapshotReference(originalReceipt, { includeGuidance: false }),
+        'Audit (full request, response, usage and selection metadata):', formatSnapshotReference(manifestReceipt, { includeGuidance: false })].join('\n\n')
       const replacement = [{ ...content[0], text }]
       const output = measureContent(replacement)
       if (exec.signal?.aborted) { reason = 'aborted'; return undefined }
