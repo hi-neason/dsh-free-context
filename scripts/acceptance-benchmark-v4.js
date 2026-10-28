@@ -6,6 +6,7 @@ import { acceptanceCriteriaV2, createAcceptancePlanV2, acceptanceReplayAdapterV2
 import { safeFailure, summarizeUsage } from './evaluation-accounting.js'
 import { phaseResponseSchema } from './evaluation-contract.js'
 import { inspectOriginalCalibration } from './acceptance-evidence.js'
+import { retirementDiscoveryAdapter } from '../test/fixtures/retirement-discovery-provider.js'
 
 export const acceptanceCriteriaV4 = Object.freeze({ ...acceptanceCriteriaV2, version: 4,
   experimentalPairedMedianMustBePositive: true, experimentalAdmission: 'measured-trial',
@@ -52,6 +53,7 @@ function requestedProtocol(fixture, options) {
 }
 
 export function acceptanceReplayAdapterV4(options) {
+  if (options.fixture.discoverSourcePath === true && ['history-retirement-short', 'history-retirement-stress'].includes(options.fixture.id)) return retirementDiscoveryAdapter(options)
   const adapter = acceptanceReplayAdapterV2(options)
   const stream = adapter.stream.bind(adapter)
   // Auxiliary selection shares the adapter but must not advance the scripted

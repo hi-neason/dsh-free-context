@@ -675,6 +675,8 @@ DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:acceptance -- --version 4 \
 
 CLI 仍在调用前独占保存计划，并逐任务保存完整结果；原始账本不完整会停止后续执行。直接调用的对应接口为 `evaluateAcceptanceV4()`、`summarizeAcceptanceV4()`、`originalAcceptanceV4()`，真实模式继续要求冻结的价格／来源和异步计划／结果检查点。117 次官方 AgentLoop 脚本回放通过，只证明协议执行；货币收益为 `null`，`accepted=false`。原始十四项仍需同版本真实校准、独立负回测和完整任务对照，不能用回放或旧研究拼接通过。
 
+首次 V4 付费冻结前，两项 history 任务启用了来源路径发现：不再提前把原始路径放入用户消息，而由 `fixture` 返回随机文件名的 locator；三组都据此形成读取依赖。原始正文、标准事实、必需工具及 short 的 2／stress 的 1000 次预测策略不变，但模型输入与工具输出确实变化。对应回放只从模型可见消息提取原始路径、快照路径和答案，短期插件场景明确经过经济拒绝，压力场景明确退场并恢复。修订重新跑完整 117 次，旧 V4 manifest 不能混入，新 manifest 与源码须重新冻结；历史提交、先前回放日志及 V3 失败保留。PTC 批处理仍是独立无退场反例，不能由此保证真实模型轨迹或收益。
+
 ### 历史缺陷编码任务材料
 
 `development-fixtures.js` 提供 `json-output-limit`，来自本仓库真实修复：旧源码提交 `916fe21`，修复及完整回归测试提交 `bbedaa5`。问题是重复 schema 字段可使不足 25 KB 的编码输入展开约 20 MB；任务要求修复输出字节预算，并保留正常解码及 UTF-8 边界行为。

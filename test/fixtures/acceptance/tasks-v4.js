@@ -33,6 +33,7 @@ export function acceptanceFixturesV4() {
   return acceptanceFixturesV3().map(task => {
     const { answer, ...data } = task
     task = { ...structuredClone(data), answer }
+    if (task.historyRetirement) task.discoverSourcePath = true
     const phases = schemas[task.id]
     if (!phases || phases.length !== (task.phases?.length ?? 1)) throw new Error('Incomplete v4 response schema declarations')
     return task.phases

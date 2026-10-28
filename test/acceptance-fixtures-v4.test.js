@@ -25,6 +25,7 @@ test('prospective v4 declares every response shape while preserving all thirteen
       assert.ok(responseSchemaIssues({ wrapped: phase.expected }, schema).length)
     }
     for (const key of ['coverage', 'requireReadEachPhase', 'requireFixtureEachPhase', 'requireSnapshot', 'historyRetirement', 'expectedRetirement', 'expectedFallback', 'adoptionRequired', 'tier', 'experiment', 'ptc', 'edit', 'editedText', 'rejectPlaceholderValues']) assert.deepEqual(task[key], previous[key])
+    assert.equal(task.discoverSourcePath, task.historyRetirement ? true : previous.discoverSourcePath)
   }
 })
 
