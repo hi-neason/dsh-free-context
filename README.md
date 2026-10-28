@@ -660,9 +660,20 @@ DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:acceptance -- --version 3 \
 
 `type` 也可用非空、无重复的类型列表，如 `['string', 'null']`；最多包含上述七种类型。联合节点仅允许 `type`，不同时接受对象或数组的结构关键字。混合 JSON 数组可用 `items: {type: ['boolean', 'number', 'string', 'object', 'null']}` 声明元素类型范围，不规定元素数量、顺序或值；容器内部未声明的结构仍由独立事实验收检查。
 
-前瞻 fixture `test/fixtures/acceptance/tasks-v4.js` 为原有 13 个场景的每个阶段声明字段和类型，不改变 v3 原文、标准事实、工具要求、实验开关或恢复条件，也不从标准答案生成 schema。13 个场景在三组官方 AgentLoop 中共 39 次脚本回放通过；这是新 fixture 的单轮覆盖，尚非完整 117 次调度、真实费用对照或同版本校准联合验收。旧协议与失败结果不重算。
+前瞻 fixture `test/fixtures/acceptance/tasks-v4.js` 为原有 13 个场景的每个阶段声明字段和类型，不改变 v3 原文、标准事实、工具要求、实验开关或恢复条件，也不从标准答案生成 schema。最初的 39 次场景回放验证单轮覆盖；完整 V4 入口进一步执行下述 117 次均衡调度。旧协议与失败结果不重算。
 
 `test/fixtures/acceptance/retirement-v4.js` 另提供独立的来源定位校准场景：先从工具结果发现原始文件路径，再定向读取首行，并在历史结果退场后读取当时快照。只依赖模型可见消息的串行回放中，两组基线各 3 次请求，插件 4 次请求、退场后 2 次请求，快照结果进入后续模型输入。PTC 批处理对照可在 2 次请求中正确完成，但没有退场轨迹，不能用于校准；它与直接调用场景保持独立 scope。三次训练和一次独立留出仍必须用真实模型、同 fixture/策略/运行配置完成；留出不超过 2 次后续请求、实际负收益及训练预测拒绝退场的原门槛均未放宽。
+
+### v4 完整响应协议
+
+`--version 4` 保留同一 13 项任务、三次重复及 117 次调度，逐阶段绑定声明式 schema，并独立检查原始 JSON、解析值和精确事实。原核心收益、三模式各自实际采用和累计／配对中位数正收益、生命周期、回退及预算门槛保留；不会把 schema 正确当作事实正确，也不接受旧版本报告改标签。新问题中声明 schema 的开销会计入真实任务用量。
+
+```sh
+DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:acceptance -- --version 4 \
+  --output /private/path/replay-v4.json
+```
+
+CLI 仍在调用前独占保存计划，并逐任务保存完整结果；原始账本不完整会停止后续执行。直接调用的对应接口为 `evaluateAcceptanceV4()`、`summarizeAcceptanceV4()`、`originalAcceptanceV4()`，真实模式继续要求冻结的价格／来源和异步计划／结果检查点。117 次官方 AgentLoop 脚本回放通过，只证明协议执行；货币收益为 `null`，`accepted=false`。原始十四项仍需同版本真实校准、独立负回测和完整任务对照，不能用回放或旧研究拼接通过。
 
 ### 历史缺陷编码任务材料
 
