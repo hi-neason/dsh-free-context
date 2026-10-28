@@ -14,6 +14,7 @@ import * as experimentsPlugin from '../src/experiments.js'
 import { loadFixtures } from './evaluate.js'
 
 const runtime = createRequire(resolve(process.env.DSH_RUNTIME_ROOT ?? '.omx/integration-runtime', 'package.json'))
+export const agentRuntimePackagePath = runtime.resolve('./package.json')
 const load = name => import(pathToFileURL(runtime.resolve(`@deepseek-ai/${name}`)).href)
 const { Context } = await load('cordis')
 const { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } = await load('dsh-agent-loop-testkit')
