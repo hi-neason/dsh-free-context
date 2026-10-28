@@ -660,6 +660,8 @@ DSH_RUNTIME_ROOT=/path/to/runtime npm run evaluate:acceptance -- --version 3 \
 
 `type` 也可用非空、无重复的类型列表，如 `['string', 'null']`；最多包含上述七种类型。联合节点仅允许 `type`，不同时接受对象或数组的结构关键字。混合 JSON 数组可用 `items: {type: ['boolean', 'number', 'string', 'object', 'null']}` 声明元素类型范围，不规定元素数量、顺序或值；容器内部未声明的结构仍由独立事实验收检查。
 
+前瞻 fixture `test/fixtures/acceptance/tasks-v4.js` 为原有 13 个场景的每个阶段声明字段和类型，不改变 v3 原文、标准事实、工具要求、实验开关或恢复条件，也不从标准答案生成 schema。13 个场景在三组官方 AgentLoop 中共 39 次脚本回放通过；这是新 fixture 的单轮覆盖，尚非完整 117 次调度、真实费用对照或同版本校准联合验收。旧协议与失败结果不重算。
+
 ### 历史缺陷编码任务材料
 
 `development-fixtures.js` 提供 `json-output-limit`，来自本仓库真实修复：旧源码提交 `916fe21`，修复及完整回归测试提交 `bbedaa5`。问题是重复 schema 字段可使不足 25 KB 的编码输入展开约 20 MB；任务要求修复输出字节预算，并保留正常解码及 UTF-8 边界行为。
