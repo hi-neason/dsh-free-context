@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { agentCompletion, agentFixtures, groups, runAgentFixture } from './evaluate-agent.js'
+import { agentCompletion, agentFixtures, groups, runAgentFixture, evaluationConsoleReplacer } from './evaluate-agent.js'
 import { retirementEvidenceHash } from './calibrate-retirement.js'
 
 // Declared before execution, deliberately testable against actual remaining requests.
@@ -46,7 +46,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const key = file ? (await readFile(file, 'utf8')).trim() : process.env.DEEPSEEK_API_KEY
     const prices = get('--pricing-file') ? JSON.parse(await readFile(get('--pricing-file'), 'utf8')) : undefined
     const report = await evaluateRetirement({ key, prices, replay: args.includes('--replay'), model: get('--model') })
-    console.log(JSON.stringify(report, null, 2))
+    console.log(JSON.stringify(report, evaluationConsoleReplacer, 2))
     if (!report.completed) process.exitCode = 1
   } catch {
     console.error('Retirement evaluation failed; no credential or provider response body printed.')

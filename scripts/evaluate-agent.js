@@ -132,13 +132,37 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       const visibleToolResults = (request.messages ?? []).filter(message => message.role === 'tool').map(message => ({ callId: message.toolCallId, contentHash: contentHash(message.content) }))
       const record = { visibleToolResults, id: modelCalls.length + 1, agentStep: steps, kind: request.tools?.length ? 'agent' : 'auxiliary', provider: request.provider, model: request.model, usage: null, finish: null }
       modelCalls.push(record)
+      // Observed block-end text is diagnostic evidence, not a valid or complete
+      // selector answer. Bound retained bodies and metadata independently.
+      const observed = record.kind === 'auxiliary' ? { bytes: 0, blockCount: 0, omitted: false, blocks: [] } : undefined
+      const observedHash = observed ? createHash('sha256') : undefined
+      let retainedBytes = 0
+      if (observed) record.observedAuxiliaryTextBlocks = observed
       try {
         for await (const chunk of next()) {
+          if (observed && chunk.type === 'block-end' && chunk.block?.type === 'text' && typeof chunk.block.text === 'string') {
+            const text = chunk.block.text
+            const bytes = Buffer.byteLength(text)
+            observed.bytes += bytes
+            observed.blockCount++
+            observedHash.update(text)
+            if (observed.blocks.length < 16) {
+              const block = { index: Number.isSafeInteger(chunk.index) && chunk.index >= 0 ? chunk.index : null, bytes, sha256: createHash('sha256').update(text).digest('hex') }
+              if (bytes <= 16 * 1024 - retainedBytes) { block.text = text; retainedBytes += bytes }
+              else { block.omitted = true; observed.omitted = true }
+              observed.blocks.push(block)
+            } else observed.omitted = true
+          }
           if (chunk.type === 'usage') record.usage = chunk.usage
           if (chunk.type === 'finish') record.finish = chunk.reason.kind
           yield chunk
         }
-      } finally { record.complete = validUsage(record.usage) && record.finish !== null }
+      } finally {
+        // This aggregate hashes concatenated observed block texts, including
+        // omitted bodies/blocks; it does not imply a successful response.
+        if (observed) observed.sha256 = observedHash.digest('hex')
+        record.complete = validUsage(record.usage) && record.finish !== null
+      }
     })())
     if (fixture.ptc) {
       for (const name of ['dsh-subprocess-local', 'dsh-sandbox-local']) { const module = await load(name); await ctx.plugin(module.default ?? module) }
@@ -327,6 +351,12 @@ export async function evaluateAgent(options = {}) {
     limitations: ['Bounded fixed fixture tasks, not general coding workload evidence.', 'Baselines load real spill policy at base-bundle 12500 or tuned 1200; unrelated full CLI profile plugins are not loaded.', 'Fixed group order and shared provider cache confound comparisons; this is not a randomized repeated benchmark.', 'Price estimates apply caller-supplied uniform rates to the whole run; verify date, model, peak/off-peak and holiday regime. No automatic rate selection or billed-charge claim.', 'Incomplete usage exposes only known counts and yields null cost, not zero cost.'], tasks }
 }
 
+/** Console output never traverses or prints auxiliary evidence, even a malformed
+ * same-named field inside a model answer. Full evidence belongs in private logs. */
+export function evaluationConsoleReplacer(key, value) {
+  return key === 'observedAuxiliaryTextBlocks' ? { consoleTextOmitted: true } : value
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   try {
     const args = process.argv.slice(2)
@@ -336,7 +366,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const key = file ? (await readFile(file, 'utf8')).trim() : process.env.DEEPSEEK_API_KEY
     const prices = get('--pricing-file') ? JSON.parse(await readFile(get('--pricing-file'), 'utf8')) : undefined
     const report = await evaluateAgent({ replay, key, prices, model: get('--model') })
-    console.log(JSON.stringify(report, null, 2))
+    console.log(JSON.stringify(report, evaluationConsoleReplacer, 2))
     if (!report.completed) process.exitCode = 1
   } catch {
     console.error('Agent evaluation failed to start or complete; no credential or provider error body printed.')
