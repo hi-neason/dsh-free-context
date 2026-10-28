@@ -41,11 +41,20 @@ const fiber = await ctx.plugin(FreeContext, {
 | `minSavingsTokens` | `32` | 候选策略要求的最小估算 token 节省量 |
 | `json.enabled` | `true` | JSON 策略开关 |
 | `logs.enabled` | `false` | 有损日志策略开关，默认关闭 |
+| `readText.enabled` | `false` | 对明确属于源文件的 `read` 文本尝试可逆编码；需要宿主分类服务及原文存储 |
 | `retirement.enabled` | `false` | 历史结果退场；具有独立工具允许列表和经济门槛，见下文 |
 
 字节和 token 数必须为非负安全整数；未知键、错误类型和无效配置会在加载时明确报错，即使 `mode` 为 `off` 也要通过校验。配置经过复制和递归冻结，不受调用方后续修改影响。即时策略与历史退场全部关闭时不注册监听器。
 
 JSON 路由只接收单个纯文本内容块：通过工具允许列表与完整内容块体积检查后，编码适用的对象数组，解码并比较 JSON 数据，然后要求完整候选字节数和估算 token 均严格减少，且估算差值达到 `minSavingsTokens`。输入预算包含 JSON 转义与块元数据，正文单独低于上限不足以通过检查。已有编码 envelope、未知格式、非规范 JSON、多块或媒体内容保留原文。JSON 路由不丢弃字段；打开 `logs.enabled` 后可进一步匹配下文限定的 Node TAP 日志。
+
+### 可选读取文本编码
+
+`readText.enabled: true` 仅处理允许列表中的直接 `read` 调用。宿主先注册 `freeContextReadClassifier` 服务，其 `classify(read.value.path)` 必须返回与输入路径绑定的 `{kind:'source', complete:true, inputPath, canonicalPath}` 才能编码；artifact、unknown、服务缺失或失败均保留原文。分类声明来自可信宿主，不能来自工具正文或“快照登记未命中”。PTC 内部调用、工具错误和结构化值替换继续跳过。
+
+本地文件系统宿主可以使用 `dsh-free-context/read-source-classifier` 的 `createFilesystemReadClassifier({sourceRoots, artifactRoots, artifactInventoryComplete:true})`。只有宿主确认清单覆盖同一文件系统中**当前和历史全部产物根目录**，并保证读取至分类期间路径映射及清单稳定时，才能声明完整。每次分类重新检查目录、真实路径、文件类型和硬链接；缺失目录、源根外文件、opaque locator 等返回 unknown。远程或不透明存储需要对应宿主适配器。此辅助函数不能证明宿主声明、消除并发路径替换或授予恢复权限。
+
+策略先验证精确文本往返，通过原生 spillStore 保存当时的完整呈现文本，再附恢复引用。完整候选（包含说明、字典、元数据及引用）的序列化字节数和估算 token 均至少减少一半，且满足 `minSavingsTokens` 才采用；保存失败或取消保持原文。程序消费的 `value` 保持原样。编码仅保证**该次工具呈现文本**可还原，不能恢复原生 read 已规范化的换行或已截断的文件部分，也不保证模型理解等价或任务费用下降。独立 `dsh-free-context/lossless-text` 编解码器仅接受编码 frame；工具结果尾部的快照引用不属于 frame。当前尚无启用此策略的真实模型净收益结论。
 
 ## 观察与诊断
 

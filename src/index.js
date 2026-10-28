@@ -13,15 +13,16 @@ export const inject = ['tools']
 export function apply(ctx, input) {
   const config = parseConfig(input)
   if (config.mode === 'off') return
-  const snapshotTracking = config.retirement.enabled || (config.tools.length && config.logs.enabled) ? getSnapshotTracking(ctx) : undefined
+  const snapshotTracking = config.retirement.enabled || (config.tools.length && (config.logs.enabled || config.readText.enabled)) ? getSnapshotTracking(ctx) : undefined
   if (config.retirement.enabled) {
     const readTracking = config.retirement.tools.includes('read') ? installReadTracking(ctx) : undefined
     installRetirement(ctx, config.retirement, { readTracking, mode: config.mode, onSnapshot: snapshotTracking?.record,
       onDecision: record => ctx.parallel('free-context/retirement', record) })
   }
-  if (config.tools.length === 0 || (!config.json.enabled && !config.logs.enabled)) return
+  if (config.tools.length === 0 || (!config.json.enabled && !config.logs.enabled && !config.readText.enabled)) return
   ctx.on('tools/post-execute', createPostExecuteHandler(
-    createContentRouter(config, { getStore: () => ctx.get('spillStore'), onSnapshot: snapshotTracking?.record }),
+    createContentRouter(config, { getStore: () => ctx.get('spillStore'), onSnapshot: snapshotTracking?.record,
+      getReadClassifier: () => ctx.get('freeContextReadClassifier') }),
     message => ctx.logger.warn(message),
     {
       mode: config.mode,

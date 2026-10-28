@@ -50,7 +50,11 @@ export function createPostExecuteHandler(transform, warn = () => {}, options = {
       output = input
       if (!eligible(exec, input.bytes)) return finish('skipped', 'ineligible')
       if (!transform) return finish('eligible', 'no-strategy')
-      const candidate = await transform(structuredClone(content), exec)
+      // Only the execution-world path is exposed as read provenance metadata;
+      // transformers cannot change the program-facing structured result.
+      const candidate = await transform(structuredClone(content), exec, Object.freeze({
+        readPath: exec.name === 'read' && typeof result.value?.path === 'string' ? result.value.path : undefined,
+      }))
       if (exec.signal?.aborted) return finish('skipped', 'aborted')
       if (candidate === undefined) return finish('eligible', 'no-strategy')
       if (!candidate || !Array.isArray(candidate.content) || typeof candidate.strategy !== 'string' || !candidate.strategy.trim() ||

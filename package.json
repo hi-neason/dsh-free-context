@@ -9,6 +9,8 @@
     "./snapshot-telemetry": "./src/snapshot-telemetry.js",
     "./snapshot": "./src/snapshot.js",
     "./read-lifecycle": "./src/read-lifecycle.js",
+    "./read-source-classifier": "./src/read-source-classifier.js",
+    "./lossless-text": "./src/lossless-text.js",
     "./economics": "./src/economics.js",
     "./retirement": "./src/retirement.js",
     "./experiments": "./src/experiments.js",
