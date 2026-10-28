@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import { encodeSourceSpans, decodeSourceSpans } from './selector-prompt.js'
 
 const marker = '[dsh-lossless-text:'
-const header = '[dsh-lossless-text:v1]\nLossless encoding of this tool-result text, not a claim of semantic or file completeness. Decode source.spans[0].runs in order: string runs are exact literals; [index,count] repeats source.dictionary[index] count times. Concatenate without adding or removing characters. Verify the decoded UTF-8 bytes and SHA-256 against bytes and sha256.\n'
+const legacyHeader = '[dsh-lossless-text:v1]\nLossless encoding of this tool-result text, not a claim of semantic or file completeness. Decode source.spans[0].runs in order: string runs are exact literals; [index,count] repeats source.dictionary[index] count times. Concatenate without adding or removing characters. Verify the decoded UTF-8 bytes and SHA-256 against bytes and sha256.\n'
+const header = '[dsh-lossless-text:v1]\nExact tool-text encoding; file/semantic completeness not implied. Join source.spans[0].runs: literals verbatim; [i,n] repeats source.dictionary[i] n times. Verify UTF-8 bytes and sha256.\n'
 const hash = text => createHash('sha256').update(text, 'utf8').digest('hex')
 const isEnvelope = text => text.trimStart().startsWith(marker)
 
@@ -33,8 +34,11 @@ export function encodeLosslessText(text, { maxInputBytes = 1024 * 1024, maxOutpu
 export function decodeLosslessText(encoded, { maxInputBytes = 1024 * 1024, maxOutputBytes = 1024 * 1024 } = {}) {
   validateBudgets(maxInputBytes, maxOutputBytes)
   const invalid = () => { throw new TypeError('Invalid or oversized lossless text encoding') }
-  if (typeof encoded !== 'string' || !encoded.isWellFormed() || Buffer.byteLength(encoded) > maxInputBytes || !encoded.startsWith(header)) invalid()
-  const json = encoded.slice(header.length)
+  if (typeof encoded !== 'string' || !encoded.isWellFormed() || Buffer.byteLength(encoded) > maxInputBytes) invalid()
+  // Persisted v1 frames retain the original prose header; accept both exact forms.
+  const matchedHeader = [header, legacyHeader].find(candidate => encoded.startsWith(candidate))
+  if (!matchedHeader) invalid()
+  const json = encoded.slice(matchedHeader.length)
   let body
   try { body = JSON.parse(json) } catch { invalid() }
   // Canonical JSON rejects trailing text/whitespace and duplicate keys. Exact

@@ -9,6 +9,8 @@ const hash = text => createHash('sha256').update(text).digest('hex')
 const repeated = 'Common explanatory sentence. '.repeat(300)
 const source = `${repeated}\r\n唯一事实 😀: const x = " a  b ";\t\r\n{"__proto__":{"safe":true},"n":-0,"digits":"9007199254740993"}\n  trailing spaces  `
 const envelope = () => encodeLosslessText(source)
+const legacyHeader = '[dsh-lossless-text:v1]\nLossless encoding of this tool-result text, not a claim of semantic or file completeness. Decode source.spans[0].runs in order: string runs are exact literals; [index,count] repeats source.dictionary[index] count times. Concatenate without adding or removing characters. Verify the decoded UTF-8 bytes and SHA-256 against bytes and sha256.\n'
+const asLegacy = encoded => legacyHeader + encoded.slice(encoded.lastIndexOf('\n') + 1)
 const edit = (encoded, change) => {
   const start = encoded.lastIndexOf('\n') + 1
   const body = JSON.parse(encoded.slice(start))
@@ -29,7 +31,23 @@ test('lossless envelope restores exact source characters and leaves unique liter
   assert.equal(body.source.spans[0].id, 'text')
   assert.ok(body.source.spans[0].runs.some(run => typeof run === 'string' && run.includes('唯一事实 😀')))
   assert.equal(body.source.dictionary.some(text => text.includes('唯一事实 😀')), false)
-  assert.match(encoded, /not.*(?:semantic|file).*completeness/i)
+  assert.match(encoded, /(?:semantic|file).*completeness not implied/i)
+})
+
+test('compact header saves 153 bytes while preserving exact legacy decoding', () => {
+  const encoded = envelope()
+  const legacy = asLegacy(encoded)
+  assert.equal(Buffer.byteLength(legacy) - Buffer.byteLength(encoded), 153)
+  assert.equal(decodeLosslessText(legacy), source)
+  assert.throws(() => decodeLosslessText(legacy, { maxInputBytes: Buffer.byteLength(legacy) - 1 }), TypeError)
+  assert.throws(() => decodeLosslessText(edit(legacy, body => { body.sha256 = '0'.repeat(64) })), TypeError)
+  for (const frame of [encoded, legacy]) {
+    const end = frame.lastIndexOf('\n')
+    for (const candidate of [frame.replace('v1]', 'v2]'), frame.slice(0, end) + ' ' + frame.slice(end),
+      frame.replace('UTF-8', 'ASCII'), frame.replace('\n', '\r\n')]) {
+      assert.throws(() => decodeLosslessText(candidate), TypeError)
+    }
+  }
 })
 
 test('encode declines invalid, empty, oversized, nested and unprofitable source without changing it', () => {
@@ -61,7 +79,7 @@ test('decode enforces exact encoded and expanded UTF-8 budgets, hashes and confi
 test('decode rejects altered headers, unknown versions, extra text, duplicate keys and prototype fields', () => {
   const encoded = envelope()
   for (const candidate of [null, {}, source, ' ' + encoded, encoded + '\n', encoded + '\nextra',
-    encoded.replace('v1]', 'v2]'), encoded.replace('Decode', 'Change'),
+    encoded.replace('v1]', 'v2]'), encoded.replace('Join', 'Change'),
     edit(encoded, body => { body.version = 2 }), edit(encoded, body => { body.extra = true }),
     edit(encoded, body => { body.source.version = 1 }),
     edit(encoded, body => { body.source.spans.push({ id: 'extra', runs: ['x'] }) }),
