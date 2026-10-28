@@ -23,6 +23,7 @@ export async function apply(ctx) {
     }))
   }
   if (config.plugin) applyFreeContext(ctx, { mode: 'apply', tools: config.tools, minInputBytes: 0,
+    ...(config.encodeToolText === true ? { text: { enabled: true } } : {}),
     ...(config.readText?.enabled ? { readText: { enabled: true, ...(config.readText.encodeArtifacts === true ? { encodeArtifacts: true } : {}) } } : {}) })
   applyBoundary(ctx, { position: 'output' })
   nativeSpill.apply(ctx, nativeSpill.Config({ maxInlineTokens: config.maxInlineTokens }))

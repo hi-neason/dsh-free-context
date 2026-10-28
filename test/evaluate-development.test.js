@@ -86,6 +86,14 @@ test('development read packing option requires an explicit boolean', async () =>
   await assert.rejects(runDevelopmentTask('json-output-limit', 'plugin', { directory: '/tmp/not-created-development-read', readText: 'true' }), TypeError)
 })
 
+test('development tool text option requires an explicit boolean', async () => {
+  for (const encodeToolText of [null, 'true', 1, {}]) {
+    await assert.rejects(runDevelopmentTask('json-output-limit', 'plugin', {
+      directory: '/tmp/not-created-development-text', encodeToolText,
+    }), /encodeToolText must be a boolean/)
+  }
+})
+
 
 test('artifact read packing cannot start without explicit boolean read packing', async () => {
   for (const settings of [{ encodeArtifacts: true }, { readText: true, encodeArtifacts: 'true' }]) {

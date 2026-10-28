@@ -32,8 +32,36 @@ test('actual official CLI repairs the historical fixture in all three scripted g
     assert.equal(result.costComplete, false)
     assert.equal(result.estimatedCostUSD, null)
     assert.equal(result.plan.configuration.maxInlineTokens, group === 'baseline-default' ? 12500 : 1200)
+    assert.equal(Object.hasOwn(result.plan.configuration, 'encodeToolText'), false)
     assert.ok(result.tools.every(tool => tool.modelVisible))
     assert.deepEqual(JSON.parse(await readFile(join(directory, 'result.json'), 'utf8')), result)
+  }
+})
+
+test('actual CLI tool text opt-in preserves historical repair and does not bypass read classification', { skip: process.platform === 'win32', timeout: 90000 }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-coding-text-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  for (const [group, encodeToolText] of [['plugin', false], ['plugin', true], ['baseline-tuned', true]]) {
+    const result = await runDevelopmentTask('json-output-limit', group, {
+      directory: join(root, `${group}-${encodeToolText}`), runtimeRoot, encodeToolText,
+    })
+    assert.equal(result.replayComplete, true)
+    assert.equal(Object.hasOwn(result.plan.configuration, 'encodeToolText'), encodeToolText)
+    if (encodeToolText) assert.equal(result.plan.configuration.encodeToolText, group === 'plugin')
+    assert.equal(result.persistenceComplete, true)
+    assert.equal(result.structuredValuesPreserved, true)
+    const reads = result.tools.filter(tool => tool.name === 'read')
+    assert.ok(reads.length > 0)
+    for (const read of reads) {
+      assert.ok(read.modelVisible)
+      assert.equal(result.transformations.some(row => row.callId === read.callId), false)
+    }
+    for (const row of result.transformations.filter(row => row.strategy === 'tool-lossless-text-v1')) {
+      assert.equal(group, 'plugin')
+      assert.equal(encodeToolText, true)
+      assert.equal(row.finalResultPersisted, true)
+      assert.equal(row.finalResultModelVisible, true)
+    }
   }
 })
 
