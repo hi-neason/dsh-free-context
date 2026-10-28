@@ -42,6 +42,7 @@ const fiber = await ctx.plugin(FreeContext, {
 | `json.enabled` | `true` | JSON 策略开关 |
 | `logs.enabled` | `false` | 有损日志策略开关，默认关闭 |
 | `readText.enabled` | `false` | 对明确属于源文件的 `read` 文本尝试可逆编码；需要宿主分类服务及原文存储 |
+| `readText.encodeArtifacts` | `false` | 配合 `readText.enabled`，对宿主确认的 artifact 读取输出自包含可逆 frame，不创建新快照 |
 | `retirement.enabled` | `false` | 历史结果退场；具有独立工具允许列表和经济门槛，见下文 |
 
 字节和 token 数必须为非负安全整数；未知键、错误类型和无效配置会在加载时明确报错，即使 `mode` 为 `off` 也要通过校验。配置经过复制和递归冻结，不受调用方后续修改影响。即时策略与历史退场全部关闭时不注册监听器。
@@ -50,11 +51,13 @@ JSON 路由只接收单个纯文本内容块：通过工具允许列表与完整
 
 ### 可选读取文本编码
 
-`readText.enabled: true` 仅处理允许列表中的直接 `read` 调用。宿主先注册 `freeContextReadClassifier` 服务，其 `classify(read.value.path)` 必须返回与输入路径绑定的 `{kind:'source', complete:true, inputPath, canonicalPath}` 才能编码；artifact、unknown、服务缺失或失败均保留原文。分类声明来自可信宿主，不能来自工具正文或“快照登记未命中”。PTC 内部调用、工具错误和结构化值替换继续跳过。
+`readText.enabled: true` 仅处理允许列表中的直接 `read` 调用。宿主先注册 `freeContextReadClassifier` 服务，其 `classify(read.value.path)` 必须返回与输入路径绑定的 `{kind:'source', complete:true, inputPath, canonicalPath}` 才能编码源文件；artifact 默认保持原文，unknown、服务缺失或失败始终保持原文。分类声明来自可信宿主，不能来自工具正文或“快照登记未命中”。PTC 内部调用、工具错误和结构化值替换继续跳过。
 
 本地文件系统宿主可以使用 `dsh-free-context/read-source-classifier` 的 `createFilesystemReadClassifier({sourceRoots, artifactRoots, artifactInventoryComplete:true})`。只有宿主确认清单覆盖同一文件系统中**当前和历史全部产物根目录**，并保证读取至分类期间路径映射及清单稳定时，才能声明完整。每次分类重新检查目录、真实路径、文件类型和硬链接；缺失目录、源根外文件、opaque locator 等返回 unknown。远程或不透明存储需要对应宿主适配器。此辅助函数不能证明宿主声明、消除并发路径替换或授予恢复权限。
 
-策略先验证精确文本往返，通过原生 spillStore 保存当时的完整呈现文本，再附恢复引用。完整候选（包含说明、字典、元数据及引用）的序列化字节数和估算 token 均至少减少一半，且满足 `minSavingsTokens` 才采用；保存失败或取消保持原文。程序消费的 `value` 保持原样。编码仅保证**该次工具呈现文本**可还原，不能恢复原生 read 已规范化的换行或已截断的文件部分，也不保证模型理解等价或任务费用下降。独立 `dsh-free-context/lossless-text` 编解码器仅接受编码 frame；工具结果尾部的快照引用不属于 frame。当前尚无启用此策略的真实模型净收益结论。
+源文件策略先验证精确文本往返，通过原生 spillStore 保存当时的完整呈现文本，再附恢复引用。完整候选（包含说明、字典、元数据及引用）的序列化字节数和估算 token 均至少减少一半，且满足 `minSavingsTokens` 才采用；保存失败或取消保持原文。程序消费的 `value` 保持原样。编码仅保证**该次工具呈现文本**可还原，不能恢复原生 read 已规范化的换行或已截断的文件部分，也不保证模型理解等价或任务费用下降。独立 `dsh-free-context/lossless-text` 编解码器仅接受编码 frame；源文件候选尾部的快照引用不属于 frame。当前尚无启用此策略的完整真实模型净收益验收通过结果。
+
+另行设置 `readText: { enabled: true, encodeArtifacts: true }` 后，同样绑定当前路径且 `complete:true` 的 `kind:'artifact'` 可以采用 `read-artifact-lossless-text-v1`。该策略只返回包含完整当次呈现文本、UTF-8 字节数与 SHA-256 的独立 frame，**不访问存储、不登记新快照、不追加新 receipt**，因此重复读取不会产生新的渲染快照链。完整 frame 同样须满足 50% 字节与估算 token 节省及 `minSavingsTokens`；取消或转换失败保持原文。原 artifact 文件、结构化值和元数据不变。此策略不承诺存在额外的 raw 回读工具；它的文本还原能力来自 frame 自身，不能与原 artifact 文件的字节验证混用。恢复遥测依据最终工具结果标记为 `modified`，仍为 `verifiedFull:false`。该选项尚待完整真实模型任务评测。
 
 ## 观察与诊断
 
@@ -171,7 +174,7 @@ const recall = installSnapshotRecovery(ctx, {
 
 产生原文快照的主插件路径与独立实验会登记 `free-context/snapshot`；候选的 `free-context/decision.snapshots` 关联相同引用。事件仅含不透明 `referenceId`（locator 与 SHA-256 的哈希）、`sha256`、`bytes`、`sourceCallId`、`sessionId` 和 `purpose`（`original`、`audit`、`retirement`），不含 locator、恢复提示、原文或工具参数。归档记录不等于候选已采用。
 
-`free-context/recovery` 只观察同一 Session 对象中、`read.file_path` 精确等于已登记 locator 的现有 read 调用，报告 `recoveryCallId`、原引用及 `success/failed/blocked/modified/cancelled` 状态；成功且返回结构有效时附实际 `startLine/endLine/totalLines`。不推断别名，不重新读取源文件，也不提供额外恢复工具。所有事件均为 `verifiedFull: false`：返回全部行仍不能证明原始换行、字节数和哈希完全一致，更不能证明模型使用了这些内容。这些状态反映该 post-execute 观察点的结果；外层策略之后仍可能修改内容，不证明最终 Session 或模型消费。观察者异常不改变工具决策。
+`free-context/recovery` 只观察同一 Session 对象中、`read.file_path` 精确等于已登记 locator 的现有 read 调用，报告 `recoveryCallId`、原引用及 `success/failed/blocked/modified/cancelled` 状态；成功且返回结构有效时附实际 `startLine/endLine/totalLines`。不推断别名，不重新读取源文件，也不提供额外恢复工具。所有事件均为 `verifiedFull: false`：返回全部行仍不能证明原始换行、字节数和哈希完全一致，更不能证明模型使用了这些内容。诊断在 `tools/post-execute` 捕获基线，于 `tools/result` 观察冻结的最终工具结果；这不证明 Session 持久化或后续模型请求消费了该内容。观察者异常不改变工具决策。
 
 `installSnapshotTracking(ctx, { maxEntriesPerSession: 128 })` 从 `dsh-free-context/snapshot-telemetry` 导出，返回 `record(exec, receipt, purpose)` 与 `dispose()`。登记表按 Session 对象弱引用隔离并限制条目数；淘汰或卸载只删除诊断元数据。恢复/fork 不自动重建表。只有目标 Session 的 ID 与 receipt.sessionId 一致时才可显式重新登记；新 ID 的 fork 不能登记父会话 receipt，但原文能否读取仍由后端权限决定。存储权限与保留期限仍由宿主负责。
 

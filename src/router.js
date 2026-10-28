@@ -24,14 +24,24 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
     if (exec.name === 'read' && config.readText.enabled) {
       return (async () => {
         // A registry miss is not source evidence. Only an authoritative host
-        // classifier may grant source classification for this execution path.
+        // classifier may grant source or artifact classification for this path.
         const classifier = getReadClassifier()
         if (typeof classifier?.classify !== 'function' || typeof readPath !== 'string') return undefined
         const classified = await waitForBoundary(() => classifier.classify(readPath), { signal: exec.signal, timeoutMs: 1000 })
-        if (exec.signal?.aborted || classified?.kind !== 'source' || classified.complete !== true ||
+        const artifact = classified?.kind === 'artifact' && config.readText.encodeArtifacts
+        if (exec.signal?.aborted || (classified?.kind !== 'source' && !artifact) || classified.complete !== true ||
             classified.inputPath !== readPath || typeof classified.canonicalPath !== 'string') return undefined
         const encoded = encodeLosslessText(block.text, { maxInputBytes: config.maxInputBytes, maxOutputBytes: config.maxInputBytes })
         if (encoded === undefined || !smaller([{ ...block, text: encoded }])) return undefined
+        if (artifact) {
+          // Encode this complete rendered text in memory. Never archive an
+          // artifact read or append a new receipt that creates a snapshot chain.
+          const replacement = [{ ...block, text: encoded }]
+          const output = measureContent(replacement, estimator)
+          if (exec.signal?.aborted || output.bytes * 2 > input.bytes ||
+              output.estimatedTokens * 2 > input.estimatedTokens) return undefined
+          return { content: replacement, strategy: 'read-artifact-lossless-text-v1', lossy: false }
+        }
         const receipt = await archiveOriginal(getStore(), exec, block.text, { maxBytes: config.maxInputBytes })
         let snapshot
         try { snapshot = onSnapshot(exec, receipt, 'original') } catch {}

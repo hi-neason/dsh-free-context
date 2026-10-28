@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -33,7 +33,7 @@ async function fixture(t) {
     for (const ctx of contexts) await ctx.fiber.dispose()
     await rm(directory, { recursive: true, force: true })
   })
-  async function runtime({ enabled = false, classifier = true } = {}) {
+  async function runtime({ enabled = false, encodeArtifacts = false, classifier = true } = {}) {
     const ctx = new Context()
     contexts.push(ctx)
     provideWorkingDirectoryFixture(ctx, directory)
@@ -47,7 +47,7 @@ async function fixture(t) {
     }))
     const decisions = []
     ctx.on('free-context/decision', record => decisions.push(record))
-    await ctx.plugin(FreeContext, { ...config, ...(enabled ? { readText: { enabled: true } } : {}) })
+    await ctx.plugin(FreeContext, { ...config, ...(enabled ? { readText: { enabled: true, encodeArtifacts } } : {}) })
     const session = { header: { id: 'read-text-session', cwd: directory } }
     const read = (filePath, callId, owner = session) => ctx.tools.execute({
       name: 'read', callId, arguments: { file_path: filePath }, agent: { session: owner }, signal: new AbortController().signal,
@@ -134,4 +134,35 @@ test('official read defaults stay raw and enabled mode without a host classifier
   const missing = join(f.directory, 'missing.txt')
   assert.deepEqual(await enabled.read(missing, 'failed'), await baseline.read(missing, 'baseline-failed'))
   assert.equal(enabled.decisions.at(-1).reason, 'tool-failure')
+})
+
+
+test('official artifact opt-in encodes only the rendered read without creating recursive snapshots', async t => {
+  const f = await fixture(t)
+  const baseline = await f.runtime()
+  const source = await f.runtime({ enabled: true })
+  const { receipt } = unpack(await source.read(f.file, 'source-snapshot'))
+  const saved = await readFile(receipt.locator)
+  const inventory = async () => (await readdir(f.spillRoot, { recursive: true })).sort()
+  const before = await inventory()
+  await writeFile(f.file, 'source changed after archive')
+  const expected = await baseline.read(receipt.locator, 'raw-render')
+  const enabled = await f.runtime({ enabled: true, encodeArtifacts: true })
+  for (const runtime of [enabled, await f.runtime({ enabled: true, encodeArtifacts: true })]) {
+    for (let index = 0; index < 3; index++) {
+      const actual = await runtime.read(receipt.locator, `artifact-${index}`)
+      // This validates the current rendered read, not complete original file bytes
+      // or Session replay. A fresh host can classify without prior tracker state.
+      assert.equal(decodeLosslessText(actual.content[0].text), expected.content[0].text)
+      assert.deepEqual(actual.value, expected.value)
+      assert.deepEqual(actual.meta, expected.meta)
+      assert.equal(actual.isError, false)
+      assert.ok(Buffer.byteLength(JSON.stringify(actual.content)) * 2 <= Buffer.byteLength(JSON.stringify(expected.content)))
+      assert.equal(runtime.decisions.at(-1).strategy, 'read-artifact-lossless-text-v1')
+      assert.equal(runtime.decisions.at(-1).snapshots, undefined)
+      assert.deepEqual(await inventory(), before)
+      assert.deepEqual(await readFile(receipt.locator), saved)
+    }
+  }
+  verifySnapshot(receipt, saved)
 })

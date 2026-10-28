@@ -6,18 +6,20 @@ import { apply } from '../src/index.js'
 test('defaults are conservative and nested configuration is copied and frozen', () => {
   assert.deepEqual(parseConfig(), {
     mode: 'observe', tools: [], minInputBytes: 1024, maxInputBytes: 1048576,
-    minSavingsTokens: 32, json: { enabled: true }, logs: { enabled: false }, readText: { enabled: false },
+    minSavingsTokens: 32, json: { enabled: true }, logs: { enabled: false }, readText: { enabled: false, encodeArtifacts: false },
     retirement: { enabled: false, tools: [], minInputBytes: 8192, minSavingsTokens: 32,
       retainRecentResults: 4, minAgeSteps: 3, minModelUses: 2, minStepsBetweenRetirements: 1,
       phasePolicy: 'any', excerptCharacters: 256, maxEntriesPerStep: 1, maxSnapshotBytes: 1048576 },
   })
-  const input = { tools: ['read'], json: { enabled: false }, logs: { enabled: true } }
+  const input = { tools: ['read'], json: { enabled: false }, logs: { enabled: true }, readText: { enabled: true, encodeArtifacts: true } }
   const config = parseConfig(input)
   input.tools.push('exec')
   input.json.enabled = true
+  input.readText.encodeArtifacts = false
+  assert.equal(config.readText.encodeArtifacts, true)
   assert.deepEqual(config.tools, ['read'])
   assert.equal(config.json.enabled, false)
-  for (const value of [config, config.tools, config.json, config.logs]) assert.equal(Object.isFrozen(value), true)
+  for (const value of [config, config.tools, config.json, config.logs, config.readText]) assert.equal(Object.isFrozen(value), true)
   assert.throws(() => config.tools.push('exec'), TypeError)
 })
 
@@ -27,6 +29,9 @@ for (const input of [null, [], true, new Date(), { unknown: true }, { mode: 'inv
   { maxInputBytes: Infinity }, { maxInputBytes: 0 }, { minInputBytes: 20, maxInputBytes: 10 },
   { minSavingsTokens: '32' }, { minSavingsTokens: NaN }, { minSavingsTokens: Number.MAX_SAFE_INTEGER + 1 },
   { json: true }, { logs: { enabled: 'false' } }, { json: { other: true } }, { logs: { enabled: undefined } },
+  { readText: null }, { readText: [] }, { readText: { encodeArtifacts: 'true' } },
+  { readText: { encodeArtifacts: undefined } }, { readText: { unknown: true } },
+  { json: { encodeArtifacts: true } }, { logs: { encodeArtifacts: true } },
   { [Symbol('hidden')]: true }]) {
   test(`reject invalid config ${String(JSON.stringify(input))}`, () => {
     assert.throws(() => parseConfig(input), TypeError)

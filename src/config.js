@@ -26,6 +26,17 @@ function strategy(input, key, fallback) {
   return Object.freeze({ enabled })
 }
 
+function readTextStrategy(input) {
+  const value = Object.hasOwn(input, 'readText') ? input.readText : {}
+  object(value, ['enabled', 'encodeArtifacts'], 'readText')
+  const result = {}
+  for (const key of ['enabled', 'encodeArtifacts']) {
+    result[key] = Object.hasOwn(value, key) ? value[key] : false
+    if (typeof result[key] !== 'boolean') throw new TypeError(`readText.${key} must be boolean`)
+  }
+  return Object.freeze(result)
+}
+
 /** Validate and copy config so caller mutations cannot change a running policy. */
 export function parseConfig(input = {}) {
   object(input, keys, 'config')
@@ -47,7 +58,7 @@ export function parseConfig(input = {}) {
   return Object.freeze({
     mode, tools: Object.freeze([...tools]), minInputBytes, maxInputBytes,
     minSavingsTokens: integer(input, 'minSavingsTokens', 32),
-    json: strategy(input, 'json', true), logs: strategy(input, 'logs', false), readText: strategy(input, 'readText', false),
+    json: strategy(input, 'json', true), logs: strategy(input, 'logs', false), readText: readTextStrategy(input),
     retirement: resolveRetirementConfig(Object.hasOwn(input, 'retirement') ? input.retirement : {}),
   })
 }

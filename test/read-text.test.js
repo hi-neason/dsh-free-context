@@ -73,3 +73,87 @@ test('archive failure, cancellation, observer mode and excessive recovery overhe
     assert.equal(actual, decision)
   }
 })
+
+const artifactConfig = extra => config({ readText: { enabled: true, encodeArtifacts: true }, ...extra })
+const artifactClassifier = { classify: async inputPath => ({ kind: 'artifact', complete: true, inputPath, canonicalPath: inputPath }) }
+const noArchive = { getStore: () => assert.fail('artifact must not access storage'),
+  onSnapshot: () => assert.fail('artifact must not register snapshots'), getReadClassifier: () => artifactClassifier }
+
+test('artifact encoding requires both switches and produces an exact standalone frame without storage', async () => {
+  for (const readText of [{ enabled: true }, { encodeArtifacts: true }, { enabled: false, encodeArtifacts: true }]) {
+    const route = createContentRouter(config({ readText }), noArchive)
+    assert.equal(await route(content, exec(), { readPath: '/work/a.log' }), undefined)
+  }
+  const embedded = `${text}\nOriginal tool-result snapshot: {"locator":"opaque://original"}\nSnapshot referenceId: preserved`
+  const result = { ...original(), content: [{ ...content[0], text: embedded }] }
+  const before = structuredClone(result), records = []
+  const route = createContentRouter(artifactConfig(), noArchive)
+  const candidate = await route(result.content, exec(), { readPath: '/work/a.log' })
+  assert.equal(candidate.strategy, 'read-artifact-lossless-text-v1')
+  assert.equal(candidate.lossy, false)
+  assert.equal(candidate.snapshots, undefined)
+  assert.equal(decodeLosslessText(candidate.content[0].text), embedded)
+  const handler = createPostExecuteHandler(route, undefined, { mode: 'apply', report: record => records.push(record) })
+  const actual = await handler(exec(), result, async () => ({ kind: 'accept' }))
+  assert.deepEqual(actual.content, candidate.content)
+  assert.equal(actual.content[0].metadata, 'preserved')
+  assert.deepEqual(result, before)
+  assert.equal(records.at(-1).snapshots, undefined)
+  assert.equal(records.at(-1).strategy, 'read-artifact-lossless-text-v1')
+  assert.deepEqual(await route(result.content, exec(), { readPath: '/work/a.log' }), candidate)
+  assert.equal(await route(candidate.content, exec(), { readPath: '/work/a.log' }), undefined)
+})
+
+test('artifact opt-in rejects incomplete, unknown and path-mismatched classifications', async () => {
+  for (const classified of [{ kind: 'unknown', complete: true },
+    { kind: 'artifact', complete: false, inputPath: '/work/a.log', canonicalPath: '/work/a.log' },
+    { kind: 'artifact', complete: true, inputPath: '/other', canonicalPath: '/other' },
+    { kind: 'artifact', complete: true, inputPath: '/work/a.log' }]) {
+    const route = createContentRouter(artifactConfig(), { ...noArchive, getReadClassifier: () => ({ classify: async () => classified }) })
+    assert.equal(await route(content, exec(), { readPath: '/work/a.log' }), undefined)
+  }
+})
+
+test('artifact frame gates include serialized metadata, token ratio and minimum savings', async () => {
+  const cases = [
+    { input: [{ ...content[0], metadata: 'x'.repeat(100000) }] },
+    { estimator: bytes => bytes > 30000 ? 100 : 75 },
+    { policy: { minSavingsTokens: 100000 } },
+  ]
+  for (const entry of cases) {
+    const route = createContentRouter(artifactConfig(entry.policy), { ...noArchive, estimator: entry.estimator })
+    assert.equal(await route(entry.input ?? content, exec(), { readPath: '/work/a.log' }), undefined)
+  }
+})
+
+test('artifact encoding preserves observe, error, PTC, replacement and cancellation boundaries', async () => {
+  for (const kind of ['observe', 'error', 'ptc', 'value', 'blocked', 'classify-cancel', 'report-cancel', 'classifier-failure']) {
+    const controller = new AbortController(), execution = { ...exec(), signal: controller.signal }
+    const result = original(), decision = { kind: kind === 'blocked' ? 'block' : 'accept' }
+    if (kind === 'error') result.isError = true
+    if (kind === 'ptc') execution.parent = 'parent'
+    if (kind === 'value') decision.value = null
+    const route = createContentRouter(artifactConfig(), { ...noArchive, getReadClassifier: () => ({ classify: async inputPath => {
+      if (kind === 'classifier-failure') throw Error('unavailable')
+      if (kind === 'classify-cancel') controller.abort()
+      return artifactClassifier.classify(inputPath)
+    } }) })
+    const handler = createPostExecuteHandler(route, undefined, { mode: kind === 'observe' ? 'observe' : 'apply',
+      report: () => { if (kind === 'report-cancel') controller.abort() } })
+    assert.equal(await handler(execution, result, async () => decision), decision)
+  }
+})
+
+
+test('artifact opt-in leaves source archival and snapshot registration intact', async () => {
+  const saves = [], registrations = []
+  const route = createContentRouter(artifactConfig(), { getReadClassifier: () => classifier,
+    getStore: () => receiptStore(saves), onSnapshot: (...args) => { registrations.push(args) } })
+  const candidate = await route(content, exec(), { readPath: '/work/a.log' })
+  assert.equal(candidate.strategy, 'read-lossless-text-v1')
+  assert.equal(saves.length, 1)
+  assert.equal(saves[0].content, text)
+  assert.equal(registrations.length, 1)
+  assert.equal(registrations[0][2], 'original')
+  assert.match(candidate.content[0].text, /Original tool-result snapshot:/)
+})
