@@ -26,9 +26,17 @@ test('full 138-slot official AgentLoop and real CLI replay journals immutable so
     async onPlan(plan) {
       assert.deepEqual(await readJson(join(root, 'bundle-plan.json')), plan)
       assert.ok(Object.isFrozen(plan.inputs.runtimes.agent))
+      assert.equal(plan.benchmarkPlan.readText, true)
+      assert.equal(plan.developmentPlan.readText, true)
     },
     async onResult(row, slot, plan) {
       results++
+      const configuration = slot.kind === 'development' ? row.taskPlan.configuration : row.configuration
+      assert.deepEqual(configuration.readText, { enabled: slot.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 })
+      if (slot.kind !== 'development' && slot.group === 'plugin') {
+        assert.equal(row.readClassification.artifactInventoryComplete, true)
+        assert.equal(row.readClassification.artifactRoots[0], join(row.readClassification.sourceRoots[0], 'spill'))
+      }
       assert.ok(Object.isFrozen(row))
       const saved = await journal(root)
       const last = saved.at(-1)
@@ -284,9 +292,10 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 const originalRm = fs.rm;
 const leftovers = new Set();
+const temporaryRoots = [resolve(tmpdir()), await fs.realpath(tmpdir())];
 const parent = await fs.mkdtemp(join(tmpdir(), 'dsh-cleanup-evidence-'));
 fs.rm = async (path, options) => {
-  if (typeof path === 'string' && basename(path).startsWith('dsh-agent-eval-') && resolve(dirname(path)) === resolve(tmpdir())) {
+  if (typeof path === 'string' && basename(path).startsWith('dsh-agent-eval-') && temporaryRoots.includes(resolve(dirname(path)))) {
     leftovers.add(path);
     throw Object.assign(new Error('private cleanup error'), {code:'EACCES'});
   }

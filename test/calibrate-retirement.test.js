@@ -74,3 +74,16 @@ test('configuration changes and missing runner identity cannot share a forecast 
     assert.equal(calibrateRetirementReports(data).status, 'declined')
   }
 })
+
+test('read policy is validated and changes the comparable calibration scope', () => {
+  const base = reports()
+  const revised = reports()
+  for (const report of revised) for (const task of report.tasks) task.configuration.readText = {
+    enabled: task.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5,
+  }
+  const calibrated = calibrateRetirementReports(revised)
+  assert.equal(calibrated.status, 'calibrated')
+  assert.notEqual(calibrated.scope, calibrateRetirementReports(base).scope)
+  revised[0].tasks[2].configuration.readText.classifier = 'incomplete-registry'
+  assert.notEqual(calibrateRetirementReports(revised).status, 'calibrated')
+})

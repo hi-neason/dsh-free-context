@@ -14,7 +14,7 @@ const groups = ['baseline-default', 'baseline-tuned', 'plugin']
 export function runnerConfigurationScope(tasks) {
   if (!Array.isArray(tasks)) return undefined
   const scope = []
-  const keys = ['maxInlineTokens', 'plugin', 'nativePolicyInstalledAfterPlugin', 'validationFeedbackLimit', 'maxSteps', 'timeoutMs']
+  const keys = ['maxInlineTokens', 'plugin', 'nativePolicyInstalledAfterPlugin', 'validationFeedbackLimit', 'maxSteps', 'timeoutMs', 'readText']
   for (const group of groups) {
     const records = tasks.filter(task => task?.group === group)
     const config = records[0]?.configuration
@@ -24,6 +24,8 @@ export function runnerConfigurationScope(tasks) {
         typeof config.nativePolicyInstalledAfterPlugin !== 'boolean' ||
         !Number.isSafeInteger(config.validationFeedbackLimit) || config.validationFeedbackLimit < 0 || config.validationFeedbackLimit > 2 ||
         ['maxSteps', 'timeoutMs'].some(key => config[key] !== undefined && (!Number.isSafeInteger(config[key]) || config[key] < 1)) ||
+        Object.hasOwn(config, 'readText') && !isDeepStrictEqual(config.readText,
+          { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 }) ||
         records.some(task => !isDeepStrictEqual(task.configuration, config))) return undefined
     scope.push({ group, configuration: structuredClone(config) })
   }

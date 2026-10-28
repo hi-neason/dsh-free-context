@@ -26,7 +26,8 @@ function freeze(value) {
 }
 const copy = value => freeze(structuredClone(value))
 const attempt = (fn, fallback = null) => { try { return fn() } catch { return fallback } }
-const configuration = group => ({ maxInlineTokens: group === 'baseline-default' ? 12500 : 1200, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: true, validationFeedbackLimit: 2, maxSteps: 12, timeoutMs: 120000 })
+const configuration = group => ({ maxInlineTokens: group === 'baseline-default' ? 12500 : 1200, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: true, validationFeedbackLimit: 2, maxSteps: 12, timeoutMs: 120000,
+  readText: { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 } })
 
 /** Pure prospective plan. Filesystem existence, realpath and write-once creation
  * are executor responsibilities; this checks lexical containment only. */
@@ -53,7 +54,7 @@ export function createAcceptanceBundlePlanV4({ rootDir, bundleId, seed = 2026102
   calibration.runs = [...calibration.trainingRunIds, calibration.heldoutRunId].map((runId, index) => ({ runId, role: index === 3 ? 'heldout' : 'training', groups: groups.map((_, position) => groups[(position + index) % 3]) }))
   const benchmarkPlan = createAcceptancePlanV4({ seed })
   const developmentPlan = createDevelopmentStudyPlan({ directory: join(rootDir, 'development'), runtimeRoot: runtimes.cli.root,
-    sourceTreeHash: provenance.sourceTreeHash, runtimeLockHash: runtimes.cli.lockHash, ...developmentIdentity, replay, pricing,
+    sourceTreeHash: provenance.sourceTreeHash, runtimeLockHash: runtimes.cli.lockHash, ...developmentIdentity, replay, pricing, readText: true,
     maxTotalCostUSD, maxTotalCalls: Math.min(maxTotalCalls, 216), ...taskDevelopmentBudget, maxTaskCostUSD: taskDevelopmentBudget.maxCostUSD })
   const slots = [
     ...calibration.runs.flatMap(run => run.groups.map(group => ({ slotId: `cal/${run.runId}/${group}`, kind: 'calibration', runId: run.runId, group, budget: taskAgentBudget, conditional: false }))),
@@ -220,5 +221,5 @@ export function summarizeAcceptanceBundleV4(report) {
     knownPriorSpendUSD: plan.inputs.knownPriorSpendUSD, priorUnpricedCalls: plan.inputs.priorUnpricedCalls,
     knownLifetimeSpendUSD: !plan.inputs.replay && knownPricedUsageUSD !== null ? plan.inputs.knownPriorSpendUSD + knownPricedUsageUSD : null,
     eligibleCounts, eligibleCosts, eligibleNetSavingsUSD, eligibleSavingsAccepted,
-    claimBoundary: 'Fixed v4 bundle only; replay never proves calibration, runtime forecast or monetary benefit. Per-task limits are observed ceilings, not a guarantee against single-request overshoot. Historical unpriced calls remain unknown.' }
+    claimBoundary: 'Fixed v4 bundle with source-read encoding only; combined savings do not isolate model-selection causality. Replay never proves calibration, runtime forecast or monetary benefit. Per-task limits are observed ceilings, not a guarantee against single-request overshoot. Historical unpriced calls remain unknown.' }
 }

@@ -7,6 +7,7 @@ import { safeFailure, summarizeUsage } from './evaluation-accounting.js'
 import { phaseResponseSchema } from './evaluation-contract.js'
 import { inspectOriginalCalibration } from './acceptance-evidence.js'
 import { retirementDiscoveryAdapter } from '../test/fixtures/retirement-discovery-provider.js'
+import { decodeLosslessText } from '../src/lossless-text.js'
 
 export const acceptanceCriteriaV4 = Object.freeze({ ...acceptanceCriteriaV2, version: 4,
   experimentalPairedMedianMustBePositive: true, experimentalAdmission: 'measured-trial',
@@ -30,7 +31,7 @@ const experimentSettings = Object.freeze({ promptEncoding: 'auto', admission: 'm
 export function createAcceptancePlanV4({ seed = 20261026 } = {}) {
   const previous = createAcceptancePlanV2({ seed })
   const tasks = acceptanceFixturesV4().map(({ answer, ...task }) => ({ ...task, sourceHash: hash(task.text) }))
-  const plan = { version: 4, seed, criteria: acceptanceCriteriaV4, experimentSettings: { ...experimentSettings, tools: [...experimentSettings.tools] },
+  const plan = { version: 4, seed, criteria: acceptanceCriteriaV4, readText: true, experimentSettings: { ...experimentSettings, tools: [...experimentSettings.tools] },
     experimentPricingSource: 'The complete report pricing and model supplied before execution; synthetic rates for replay only.', tasks, runs: previous.runs }
   return { ...plan, manifestHash: hash(plan) }
 }
@@ -44,7 +45,7 @@ export function experimentalConfigV4(fixture, { replay = false, pricing } = {}) 
 }
 
 function requestedProtocol(fixture, options) {
-  return { requireFixtureEachPhase: fixture.requireFixtureEachPhase === true, rejectPlaceholderValues: fixture.rejectPlaceholderValues === true,
+  return { readText: true, requireFixtureEachPhase: fixture.requireFixtureEachPhase === true, rejectPlaceholderValues: fixture.rejectPlaceholderValues === true,
     discoverSourcePath: fixture.discoverSourcePath === true, ptc: fixture.ptc === true,
     requireSnapshot: fixture.requireSnapshot === true, requireReadEachPhase: fixture.requireReadEachPhase === true,
     responseSchemas: (fixture.phases ?? [fixture]).map(phase => phaseResponseSchema(fixture, phase) ?? null),
@@ -54,7 +55,8 @@ function requestedProtocol(fixture, options) {
 
 export function acceptanceReplayAdapterV4(options) {
   if (options.fixture.discoverSourcePath === true && ['history-retirement-short', 'history-retirement-stress'].includes(options.fixture.id)) return retirementDiscoveryAdapter(options)
-  const adapter = acceptanceReplayAdapterV2(options)
+  let visibleDelivered = ''
+  const adapter = acceptanceReplayAdapterV2({ ...options, delivered: () => visibleDelivered })
   const stream = adapter.stream.bind(adapter)
   // Auxiliary selection shares the adapter but must not advance the scripted
   // agent's fixture/read/answer sequence. Its usage is still emitted and charged.
@@ -66,6 +68,15 @@ export function acceptanceReplayAdapterV4(options) {
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
+    // Test parsing only: derive the answer source from the actual visible tool
+    // message, never from fixture.text, structured values or the filesystem.
+    const message = request.messages?.filter(message => message.role === 'tool').at(-1)
+    visibleDelivered = (message?.content ?? []).filter(block => block.type === 'text').map(block => {
+      if (!block.text.startsWith('[dsh-lossless-text:')) return block.text
+      const split = block.text.indexOf('\n\nOriginal tool-result snapshot: ')
+      if (split < 0) throw new TypeError('Missing lossless read receipt')
+      return decodeLosslessText(block.text.slice(0, split))
+    }).join('\n')
     yield* stream(request)
   }
   return adapter
@@ -87,7 +98,8 @@ export function summarizeAcceptanceV4(plan, results, options = {}) {
     const fixture = canonical.tasks.find(task => task.id === run.task)
     return isDeepStrictEqual(run.configuration, { maxInlineTokens: run.group === 'baseline-default' ? 12500 : 1200,
       plugin: run.group === 'plugin', nativePolicyInstalledAfterPlugin: true, validationFeedbackLimit: 2,
-      maxSteps: canonical.criteria.maxSteps, timeoutMs: canonical.criteria.timeoutMs }) &&
+      maxSteps: canonical.criteria.maxSteps, timeoutMs: canonical.criteria.timeoutMs,
+      readText: { enabled: run.group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5 } }) &&
       isDeepStrictEqual(run.requestedProtocol, requestedProtocol(fixture, options))
   })
   const lifecycleComplete = canonical.tasks.filter(task => task.historyRetirement).every(task => {
@@ -121,7 +133,7 @@ export function summarizeAcceptanceV4(plan, results, options = {}) {
     experimentalModesAccepted, modes, core, experimental, stress, budgetComplete, totalCostUSD, modelCalls,
     correctionCount: results.reduce((total, run) => total + (run.correctionCount ?? 0), 0),
     replayComplete: options.replay === true && overall.replayComplete && accountingComplete && configurationComplete && lifecycleComplete && fallbackComplete && budgetComplete,
-    claimBoundary: 'Fixed synthetic tasks with explicit opt-in measured-trial selection; no default-admission or general workload savings claim. Stress recovery is excluded from savings gates. Full benchmark acceptance still requires separate comparable calibration/backtest evidence for all fourteen features.' }
+    claimBoundary: 'Fixed synthetic tasks with explicit opt-in measured-trial selection plus source-read encoding; combined savings do not isolate the causal benefit of model selection. No default-admission or general workload savings claim. Stress recovery is excluded from savings gates. Full benchmark acceptance still requires separate comparable calibration/backtest evidence for all fourteen features.' }
 }
 
 export function originalAcceptanceV4(report, calibrationEvidence, negativeBacktest) {
@@ -158,7 +170,7 @@ export async function evaluateAcceptanceV4({ seed = 20261026, replay = true, key
     let result
     try { result = await run(fixture, scheduled.group, { key, replay, prices: pricing, model: pricing?.model ?? 'deepseek-flash',
       experimentalConfig: protocol.experimentalConfig ?? undefined, historyRetirement: fixture.historyRetirement,
-      composeWithTunedNative: true, validationFeedbackLimit: 2, adapterFactory: acceptanceReplayAdapterV4,
+      composeWithTunedNative: true, validationFeedbackLimit: 2, adapterFactory: acceptanceReplayAdapterV4, readText: true,
       maxSteps: plan.criteria.maxSteps, timeoutMs: plan.criteria.timeoutMs }) }
     catch (error) { result = { passed: false, usageComplete: false, failure: safeFailure(error), stoppedReason: 'runner-exception', replay, usageKind: replay ? 'synthetic-replay' : 'provider-reported' } }
     const record = frozenCopy({ ...result, ...scheduled, requestedProtocol: protocol, manifestHash: plan.manifestHash })
@@ -178,6 +190,7 @@ export async function evaluateAcceptanceV4({ seed = 20261026, replay = true, key
   return { evaluationKind: replay ? 'acceptance-v4-scripted-replay' : 'acceptance-v4-live-provider', plan, results,
     pricing: pricing ?? null, provenance: provenance ?? null, stoppedReason, ...summarizeAcceptanceV4(plan, results, { replay, pricing, provenance }),
     limitations: ['Previous protocol failures remain independently retained.', 'Provider cache is uncontrolled despite balanced order.',
+      'The frozen read policy measures combined model-selection and source-read encoding costs; read encoding cannot substitute for actual auxiliary selection adoption.',
       'Budget checks occur between bounded tasks; an overshoot fails acceptance.', 'Replay cannot prove model quality or monetary savings.',
       'History stress assumes 1000 future requests solely to exercise retirement/recovery and is excluded from net-benefit acceptance.',
       'Measured-trial selection deliberately evaluates actual costs; it does not validate default economic admission.',
