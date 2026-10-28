@@ -85,7 +85,7 @@ function agentAccounting(row, plan) {
   const complete = agentCleanupComplete(row) && Number.isSafeInteger(row?.steps) && row.steps > 0 && row.steps <= 12 &&
     Array.from({ length: row.steps }, (_, i) => i + 1).every(step => calls.some(call => call?.kind === 'agent' && call.agentStep === step)) &&
     row.usageComplete === true && calls.length > 0 && observed.complete && same(observed.usage, row.usage) &&
-    calls.every((call, index) => call?.id === index + 1 && call.complete === true && ['stop', 'tool-calls'].includes(call.finish) &&
+    calls.every((call, index) => call?.id === index + 1 && call.complete === true && (['stop', 'tool-calls'].includes(call.finish) || call.kind === 'auxiliary' && call.finish === 'max-tokens') &&
       Number.isSafeInteger(call.agentStep) && call.agentStep >= 1 && call.agentStep <= row.steps &&
       (index === 0 || call.agentStep >= calls[index - 1].agentStep) && ['agent', 'auxiliary'].includes(call.kind) &&
       (plan.inputs.replay || call.provider === 'deepseek-official' && call.model === plan.inputs.pricing.model && priceUsage(call.usage, plan.inputs.pricing) !== null)) &&

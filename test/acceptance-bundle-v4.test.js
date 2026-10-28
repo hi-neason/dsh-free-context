@@ -493,3 +493,34 @@ test('explicit task cost limits only tighten the original ceilings without chang
     assert.throws(() => createAcceptanceBundlePlanV4({ ...inputs, maxTaskCostUSD }), /tighten/)
   }
 })
+
+test('a fully metered truncated auxiliary call is priced but cannot satisfy experiment adoption', () => {
+  const report = structuredClone(bundle())
+  const row = report.benchmarkReport.results.find(row => row.task === 'experiment-task-independent' && row.group === 'plugin')
+  row.adoptions = []
+  row.experiments = [{ reason: 'unsuccessful-finish', llmCalled: true }]
+  const extra = { ...structuredClone(row.modelCalls[0]), id: 2, kind: 'auxiliary', finish: 'max-tokens', usage: usage(20) }
+  row.modelCalls.push(extra)
+  row.usage.inputTokens += extra.usage.inputTokens
+  row.usage.outputTokens += extra.usage.outputTokens
+  const result = summarizeAcceptanceBundleV4(attested(report))
+  assert.equal(result.accountingComplete, true)
+  assert.ok(result.totalCostUSD > 0)
+  assert.equal(result.totalCostUSD, result.knownPricedUsageUSD)
+  assert.equal(result.benchmark.experimentalModesAccepted, false)
+  assert.equal(result.accepted, false)
+  for (const mutate of [
+    call => { call.kind = 'agent' },
+    call => { call.usage = null },
+    call => { call.complete = false },
+    call => { call.finish = 'unknown-finish' },
+    call => { call.usage.cacheWriteTokens = 1 },
+  ]) {
+    const invalid = structuredClone(report)
+    mutate(invalid.benchmarkReport.results.find(row => row.task === 'experiment-task-independent' && row.group === 'plugin').modelCalls[1])
+    const rejected = summarizeAcceptanceBundleV4(attested(invalid))
+    assert.equal(rejected.accountingComplete, false)
+    assert.equal(rejected.totalCostUSD, null)
+    assert.equal(rejected.accepted, false)
+  }
+})
