@@ -8,6 +8,9 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
+import { decodeLosslessText } from '../src/lossless-text.js'
+import { formatSnapshotReference } from '../src/snapshot.js'
+import { verifySnapshot } from '../src/recovery.js'
 import { decodeJsonRows } from '../src/json-codec.js'
 import * as plugin from '../src/index.js'
 import * as experimentsPlugin from '../src/experiments.js'
@@ -88,6 +91,41 @@ export function collectAdoptions(events, modelCalls) {
     const text = message.content.filter(block => block.type === 'text').map(block => block.text).join('\n')
     const strategy = text.match(/^\[LOSSY (?:paragraph|diagnostic evidence) selection; policy ([a-z-]+-v1)\./)?.[1]
     if (!strategy) return []
+    const hash = contentHash(message.content)
+    const visible = modelCalls.flatMap(call => call.visibleToolResults ?? []).find(result => result.callId === message.toolCallId && result.contentHash === hash)
+    return [{ callId: message.toolCallId, strategy, persisted: true, modelVisible: Boolean(visible), contentHash: hash,
+      persistedContentHash: hash, modelVisibleContentHash: visible?.contentHash ?? null }]
+  })
+}
+
+/** Read attribution is separate from auxiliary selection and requires a final valid frame. */
+export function collectReadAdoptions(events, modelCalls, decisions, toolCalls) {
+  const strategies = ['read-lossless-text-v1', 'read-artifact-lossless-text-v1']
+  return events.filter(event => event.type === 'tool/result').flatMap(event => {
+    const message = event.data?.message
+    if (!message || message.isError || !Array.isArray(message.content) || message.content.length !== 1 ||
+      message.content[0]?.type !== 'text' || typeof message.content[0].text !== 'string' ||
+      !toolCalls.some(call => call.callId === message.toolCallId && call.name === 'read' && !call.isError)) return []
+    const selected = decisions.filter(decision => decision.callId === message.toolCallId && decision.outcome === 'selected' && strategies.includes(decision.strategy))
+    if (selected.length !== 1) return []
+    const strategy = selected[0].strategy
+    const text = message.content[0].text
+    try {
+      if (strategy === 'read-artifact-lossless-text-v1') decodeLosslessText(text)
+      else {
+        const boundary = text.indexOf('\n\nOriginal tool-result snapshot: ')
+        if (boundary < 0) return []
+        const footer = text.slice(boundary + 2)
+        const receipt = JSON.parse(footer.split('\n')[0].slice('Original tool-result snapshot: '.length))
+        const fields = ['sessionId', 'callId', 'toolName', 'sha256', 'bytes', 'locator', 'retrievalHint']
+        if (!receipt || Object.getPrototypeOf(receipt) !== Object.prototype || Object.keys(receipt).length !== fields.length ||
+            !fields.every(key => Object.hasOwn(receipt, key)) ||
+            ['sessionId', 'callId', 'locator', 'retrievalHint'].some(key => typeof receipt[key] !== 'string' || !receipt[key].trim()) ||
+            selected[0].sessionId !== undefined && receipt.sessionId !== selected[0].sessionId ||
+            receipt.callId !== message.toolCallId || receipt.toolName !== 'read' || footer !== formatSnapshotReference(receipt)) return []
+        verifySnapshot(receipt, Buffer.from(decodeLosslessText(text.slice(0, boundary)), 'utf8'))
+      }
+    } catch { return [] }
     const hash = contentHash(message.content)
     const visible = modelCalls.flatMap(call => call.visibleToolResults ?? []).find(result => result.callId === message.toolCallId && result.contentHash === hash)
     return [{ callId: message.toolCallId, strategy, persisted: true, modelVisible: Boolean(visible), contentHash: hash,
@@ -310,6 +348,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     outcome = { task: fixture.id, group, replay, passed: passed && fileCorrect, fileCorrect, exactFacts, requiredTools, snapshotRecoveryRequired, snapshotRecovered, actual, finalAnswer: text ?? null, startedAt, steps,
       drafts, feedback, correctionCount: feedback.length, responseContractSatisfied, responseSchemaSatisfied, attempts: attempts.length, usageComplete, modelCalls, phaseResults, experiments, snapshotRecoveryByPhase,
       adoptions: collectAdoptions(events, modelCalls),
+      readAdoptions: collectReadAdoptions(events, modelCalls, decisions, toolCalls),
       recoveryCalls: toolCalls.filter(call => call.readSnapshot).length,
       usageKind: replay ? 'synthetic-replay' : 'provider-reported', usage,
       estimatedCostUSD: replay || !usageComplete ? null : priceUsage(usage, prices), pricing: prices ?? null,
@@ -326,7 +365,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
   } catch (error) {
     const { usage } = summarizeUsage(modelCalls.map(call => call.complete ? call.usage : undefined))
     outcome = { task: fixture.id, group, replay, passed: false, exactFacts: false, requiredTools: false, fileCorrect: false, snapshotRecovered: false,
-      failure: safeFailure(error), stoppedReason: 'runner-exception', usageComplete: false, usage, modelCalls, phaseResults, drafts, feedback, correctionCount: feedback.length, toolCalls, experiments, retirements,
+      readAdoptions: [], failure: safeFailure(error), stoppedReason: 'runner-exception', usageComplete: false, usage, modelCalls, phaseResults, drafts, feedback, correctionCount: feedback.length, toolCalls, experiments, retirements,
       usageKind: replay ? 'synthetic-replay' : 'provider-reported', estimatedCostUSD: null, pricing: prices ?? null, steps, startedAt, elapsedMs: performance.now() - started }
     return outcome
   } finally {

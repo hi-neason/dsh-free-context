@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { readFile, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
-import { runAgentFixture } from '../../scripts/evaluate-agent.js'
+import { runAgentFixture, collectReadAdoptions } from '../../scripts/evaluate-agent.js'
 import { decodeLosslessText } from '../../src/lossless-text.js'
 import { verifySnapshot } from '../../src/recovery.js'
 import { formatSnapshotReference } from '../../src/snapshot.js'
@@ -122,6 +122,16 @@ for (const encodeArtifacts of [false, true]) test(`AgentLoop source reads and ar
     } })
   assert.equal(result.passed, true, JSON.stringify({ failure: result.failure, drafts: result.drafts, toolCalls: result.toolCalls, decisions: result.decisions,
     classifications: observed.tools.map(({ id, classification }) => ({ id, classification })) }))
+  assert.deepEqual(result.readAdoptions.map(row => row.callId), encodeArtifacts ? ['source-read', 'own-snapshot-read', 'primary-snapshot-read'] : ['source-read'])
+  assert.deepEqual(result.adoptions, [])
+  for (const row of result.readAdoptions) {
+    assert.equal(row.persisted, true)
+    assert.equal(row.modelVisible, true)
+    assert.equal(row.contentHash, row.persistedContentHash)
+    assert.equal(row.contentHash, row.modelVisibleContentHash)
+    assert.equal(row.strategy, row.callId === 'source-read' ? 'read-lossless-text-v1' : 'read-artifact-lossless-text-v1')
+    assert.equal(Object.hasOwn(row, 'text'), false)
+  }
   assert.equal(result.snapshotRecovered, true)
   assert.equal(result.fileCorrect, true)
   assert.deepEqual(result.configuration.readText, { enabled: true, classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, ...(encodeArtifacts ? { encodeArtifacts: true } : {}) })
@@ -134,6 +144,30 @@ for (const encodeArtifacts of [false, true]) test(`AgentLoop source reads and ar
   const persisted = observed.persisted.find(event => event.data.message.toolCallId === 'source-read')
   assert.deepEqual(persisted.data.message.content, source.output)
   assert.deepEqual(persisted.data.meta, source.raw.meta)
+  const selected = [{ callId: 'source-read', sessionId: receiptOf(source.output[0].text).sessionId, strategy: 'read-lossless-text-v1', outcome: 'selected' }]
+  const reads = [{ callId: 'source-read', name: 'read', isError: false }]
+  assert.equal(collectReadAdoptions([persisted], result.modelCalls, selected, reads).length, 1)
+  for (const suffix of ['\n', '\ntrailing data']) {
+    const malformed = structuredClone(persisted)
+    malformed.data.message.content[0].text += suffix
+    assert.deepEqual(collectReadAdoptions([malformed], result.modelCalls, selected, reads), [])
+  }
+  for (const change of [receipt => { delete receipt.sessionId }, receipt => { delete receipt.retrievalHint },
+    receipt => { receipt.sessionId = 'other-session' }, receipt => { receipt.sessionId = ' ' },
+    receipt => { receipt.retrievalHint = '' }, receipt => { receipt.locator = ' ' },
+    receipt => { receipt.extra = 'unexpected' }, receipt => { receipt.bytes-- },
+    receipt => { receipt.sha256 = '0'.repeat(64) }]) {
+    const malformed = structuredClone(persisted)
+    const receipt = receiptOf(source.output[0].text)
+    change(receipt)
+    const frame = source.output[0].text.split('\n\nOriginal tool-result snapshot: ')[0]
+    malformed.data.message.content[0].text = `${frame}\n\n${formatSnapshotReference(receipt)}`
+    assert.deepEqual(collectReadAdoptions([malformed], result.modelCalls, selected, reads), [])
+  }
+  assert.deepEqual(collectReadAdoptions([persisted], result.modelCalls, [], reads), [])
+  assert.deepEqual(collectReadAdoptions([persisted], result.modelCalls, selected, [{ callId: 'source-read', name: 'fixture' }]), [])
+  const mismatched = result.modelCalls.map(call => ({ ...call, visibleToolResults: call.visibleToolResults.map(row => ({ ...row, contentHash: '0'.repeat(64) })) }))
+  assert.equal(collectReadAdoptions([persisted], mismatched, selected, reads)[0].modelVisible, false)
   assert.ok(result.modelCalls.some(call => call.visibleToolResults.some(visible => visible.callId === 'source-read' && visible.contentHash === hash(source.output))))
   for (const id of ['own-snapshot-read', 'primary-snapshot-read']) {
     const read = observed.tools.find(row => row.id === id)
@@ -179,8 +213,32 @@ test('readText is explicitly boolean and default configurations retain their exi
   for (const [readText, encodeArtifacts] of [[undefined, false], [false, false], [true, false], [true, true]]) {
     const result = await runAgentFixture(task, 'baseline-tuned', { replay: true, adapterFactory: adapter, encodeArtifacts, ...(readText === undefined ? {} : { readText }) })
     assert.equal(result.passed, true)
+    assert.deepEqual(result.readAdoptions, [])
     assert.equal(Object.hasOwn(result.configuration, 'readText'), readText === true)
     assert.equal(Object.hasOwn(result, 'readClassification'), false)
     if (readText === true) assert.deepEqual(result.configuration.readText, { enabled: false, classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, ...(encodeArtifacts ? { encodeArtifacts: false } : {}) })
+  }
+})
+
+
+for (const replaceFinal of [false, true]) test(`read attribution distinguishes persisted frames from next-model visibility and downstream replacement=${replaceFinal}`, async () => {
+  const observed = { requests: [] }
+  const result = await runAgentFixture(fixture(), 'plugin', { replay: true, readText: true, maxSteps: 2,
+    adapterFactory: options => adapterFactory({ LlmAdapter: options.LlmAdapter }, observed),
+    configureContext(ctx) {
+      if (replaceFinal) ctx.on('tools/post-execute', async (exec, raw, next) => {
+        const decision = await next()
+        return exec.callId === 'source-read' ? { ...decision, content: raw.content } : decision
+      }, { prepend: true })
+    } })
+  assert.equal(result.passed, false)
+  assert.ok(result.decisions.some(row => row.outcome === 'selected' && row.strategy === 'read-lossless-text-v1'))
+  assert.deepEqual(result.adoptions, [])
+  if (replaceFinal) assert.deepEqual(result.readAdoptions, [])
+  else {
+    assert.equal(result.readAdoptions.length, 1)
+    assert.equal(result.readAdoptions[0].persisted, true)
+    assert.equal(result.readAdoptions[0].modelVisible, false)
+    assert.equal(result.readAdoptions[0].modelVisibleContentHash, null)
   }
 })
