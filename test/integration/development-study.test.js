@@ -11,15 +11,27 @@ test('nine balanced actual CLI coding replays persist plans before execution and
   const root = await mkdtemp(join(tmpdir(), 'dsh-development-study-'))
   t.after(() => rm(root, { recursive: true, force: true }))
   const directory = join(root, 'study')
-  let plans = 0, results = 0
+  let plans = 0, results = 0, taskPlans = 0
   const report = await evaluateDevelopmentStudy({ directory, runtimeRoot, maxTotalCostUSD: .5,
     async onPlan(plan) {
       plans++
       assert.deepEqual(JSON.parse(await readFile(join(directory, 'study-plan.json'), 'utf8')), plan)
       assert.equal(Object.isFrozen(plan.runs[0]), true)
     },
+    async onTaskPlan(taskPlan, slot, studyPlan) {
+      taskPlans++
+      assert.equal(plans, 1)
+      assert.equal(slot, studyPlan.runs[taskPlans - 1])
+      assert.equal(Object.isFrozen(taskPlan.configuration), true)
+      assert.equal(Object.isFrozen(slot), true)
+      const saved = (await readFile(join(directory, 'study-task-plans.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
+      assert.equal(saved.length, taskPlans)
+      assert.equal(saved.at(-1).taskPlan.manifestHash, taskPlan.manifestHash)
+      await Promise.resolve()
+    },
     async onResult(record) {
       results++
+      assert.equal(taskPlans, results)
       const starts = (await readFile(join(directory, 'study-task-plans.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
       assert.equal(starts.length, results)
       assert.equal(starts.at(-1).runId, record.runId)
@@ -27,6 +39,7 @@ test('nine balanced actual CLI coding replays persist plans before execution and
       assert.equal((await readFile(join(directory, 'study-journal.jsonl'), 'utf8')).trim().split('\n').length, results)
     } })
   assert.equal(plans, 1)
+  assert.equal(taskPlans, 9)
   assert.equal(results, 9, JSON.stringify({ stoppedReason: report.stoppedReason, checks: report.checks }))
   assert.equal(report.stoppedReason, null)
   assert.equal(report.qualityComplete, true)
@@ -40,6 +53,40 @@ test('nine balanced actual CLI coding replays persist plans before execution and
   const journal = (await readFile(join(directory, 'study-journal.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse)
   assert.equal(summarizeDevelopmentStudy(report.plan, journal).replayComplete, true)
   assert.deepEqual(JSON.parse(await readFile(join(directory, 'study-report.json'), 'utf8')), report)
+})
+
+test('an awaited nested task-plan checkpoint can stop the study before any CLI or model call', { skip: process.platform === 'win32', timeout: 30000 }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-development-task-plan-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const directory = join(root, 'study')
+  let observed = false
+  let release, entered
+  const gate = new Promise(resolve => { release = resolve })
+  const checkpointEntered = new Promise(resolve => { entered = resolve })
+  const running = evaluateDevelopmentStudy({ directory, runtimeRoot, maxTotalCostUSD: .5,
+    async onTaskPlan(plan, slot, parent) {
+      assert.equal(slot.runId, parent.runs[0].runId)
+      const child = JSON.parse(await readFile(join(slot.directory, 'plan.json'), 'utf8'))
+      assert.deepEqual(child, plan)
+      entered()
+      await gate
+      observed = true
+      throw new Error('global task reservation unavailable')
+    } })
+  try {
+    await checkpointEntered
+    await assert.rejects(readFile(join(directory, 'run-0-baseline-default/ledger.jsonl')), error => error.code === 'ENOENT')
+  } finally { release() }
+  const report = await running
+  assert.equal(observed, true)
+  assert.equal(report.stoppedReason, 'runner-exception')
+  assert.equal(report.records.length, 1)
+  assert.equal(report.records[0].result, null)
+  assert.ok(report.records[0].taskPlan)
+  assert.equal(report.callCount, 0)
+  assert.equal(report.accepted, false)
+  await assert.rejects(readFile(join(directory, 'run-0-baseline-default/ledger.jsonl')), error => error.code === 'ENOENT')
+  await assert.rejects(readFile(join(directory, 'run-0-baseline-tuned/plan.json')), error => error.code === 'ENOENT')
 })
 
 test('study pre-call checkpoint failures and insufficient full-task reservations cannot launch a task', { skip: process.platform === 'win32', timeout: 30000 }, async t => {

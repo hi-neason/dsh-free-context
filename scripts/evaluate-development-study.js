@@ -136,8 +136,9 @@ export function summarizeDevelopmentStudy(plan, records) {
     claimBoundary: 'One fixed historical development task. No adoption means no compression attribution; scripted replay cannot establish model repair or monetary benefit. This does not accept the original fourteen-feature bundle.' }
 }
 
-export async function evaluateDevelopmentStudy({ directory, runtimeRoot = process.env.DSH_CLI_RUNTIME_ROOT ?? '.omx/cli-runtime', key, onPlan, onResult, ...options } = {}) {
+export async function evaluateDevelopmentStudy({ directory, runtimeRoot = process.env.DSH_CLI_RUNTIME_ROOT ?? '.omx/cli-runtime', key, onPlan, onTaskPlan, onResult, ...options } = {}) {
   if (!isAbsolute(directory ?? '') || options.replay === false && (typeof key !== 'string' || !key.trim())) throw new TypeError('New absolute study directory and explicit live credential required')
+  if ([onPlan, onTaskPlan, onResult].some(callback => callback !== undefined && typeof callback !== 'function')) throw new TypeError('Study checkpoints must be functions')
   options = structuredClone(options)
   const root = join(await realpath(dirname(directory)), basename(directory)), repo = await realpath(repository)
   if (root === repo || root.startsWith(repo + sep)) throw new TypeError('Study directory must be outside the repository')
@@ -167,6 +168,7 @@ export async function evaluateDevelopmentStudy({ directory, runtimeRoot = proces
           if (!taskPlanMatches(plan, scheduled, task)) throw new Error('Nested task plan mismatch')
           taskPlan = task
           await appendFile(join(root, 'study-task-plans.jsonl'), JSON.stringify({ runId: scheduled.runId, manifestHash: plan.manifestHash, taskPlan: task }) + '\n', { mode: 0o600 })
+          await onTaskPlan?.(task, scheduled, plan)
         }, onResult() {} })
     } catch (error) { failure = safeFailure(error) }
     try { ledgerText = await readFile(join(scheduled.directory, 'ledger.jsonl'), 'utf8') } catch {}

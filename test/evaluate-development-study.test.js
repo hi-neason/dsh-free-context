@@ -160,4 +160,5 @@ test('scripted studies can complete protocol coverage without ever reporting dol
 test('live studies cannot begin without explicit credentials or with relative directories', async () => {
   await assert.rejects(evaluateDevelopmentStudy({ directory: '/tmp/should-not-be-created-development-study', replay: false }), TypeError)
   await assert.rejects(evaluateDevelopmentStudy({ directory: 'relative' }), TypeError)
+  for (const callback of ['onPlan', 'onTaskPlan', 'onResult']) await assert.rejects(evaluateDevelopmentStudy({ directory: '/tmp/not-created-invalid-study-callback', [callback]: true }), TypeError)
 })
