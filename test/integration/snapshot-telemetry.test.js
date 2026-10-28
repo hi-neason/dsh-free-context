@@ -12,7 +12,7 @@ const requireRuntime = createRequire(resolve(process.env.DSH_RUNTIME_ROOT ?? '.o
 const load = name => import(pathToFileURL(requireRuntime.resolve(name)).href)
 const { Context } = await load('@deepseek-ai/cordis')
 const { default: SystemPrompt } = await load('@deepseek-ai/dsh-system-prompt')
-const { default: Tools } = await load('@deepseek-ai/dsh-tools')
+const { default: Tools, defineContentToolFixture } = await load('@deepseek-ai/dsh-tools')
 const { default: LocalFs } = await load('@deepseek-ai/dsh-fs-local')
 const { default: SpillLocal } = await load('@deepseek-ai/dsh-spill-local')
 const ToolFs = await load('@deepseek-ai/dsh-tool-fs')
@@ -80,4 +80,59 @@ test('official recovery tracking respects object ownership, eviction and explici
   }
   await call('read','evicted',{file_path:receipt.locator})
   assert.equal(events.length,1)
+})
+
+for (const registration of ['before', 'after']) {
+  test(`final recovery observes a transformer registered ${registration} tracking`, async t => {
+    const { ctx, session, tracking, call } = await fixture(t)
+    if (registration === 'before') tracking.dispose()
+    ctx.on('tools/post-execute', async (exec, result, next) => {
+      const decision = await next()
+      return exec.name === 'read' ? { kind: 'accept', content: [{ type: 'text', text: 'encoded replacement' }] } : decision
+    }, { prepend: true })
+    const active = registration === 'before' ? installSnapshotTracking(ctx) : tracking
+    const events = []
+    ctx.on('free-context/recovery', record => events.push(record))
+    const exec = { name: 'fixture', callId: 'original', agent: { session } }
+    const receipt = await archiveOriginal(ctx.get('spillStore'), exec, 'original one\noriginal two')
+    active.record(exec, receipt)
+    const result = await call('read', 'transformed', { file_path: receipt.locator })
+    assert.equal(result.content[0].text, 'encoded replacement')
+    assert.equal(events.length, 1)
+    assert.equal(events[0].outcome, 'modified')
+    assert.equal(events[0].startLine, undefined)
+    assert.equal(events[0].verifiedFull, false)
+  })
+}
+
+test('definition-owned finalization is observed after post policies and receives the frozen final result', async t => {
+  const ctx = new Context()
+  t.after(() => ctx.fiber.dispose())
+  await ctx.plugin(SystemPrompt)
+  await ctx.plugin(Tools)
+  ctx.tools.register({
+    ...defineContentToolFixture({ name: 'read', description: 'finalized recovery fixture', parameters: {},
+      execute: async () => [{ type: 'text', text: 'raw source' }] }),
+    finalizeContent: () => [{ type: 'text', text: 'finalized source' }],
+  })
+  const session = { header: { id: 'finalizer-session' } }
+  const exec = { name: 'read', callId: 'finalized-read', signal: new AbortController().signal, arguments: { file_path: '/private/snapshot' }, agent: { session } }
+  const tracking = installSnapshotTracking(ctx)
+  tracking.record(exec, { locator: '/private/snapshot', callId: 'original', sessionId: session.header.id, sha256: 'a'.repeat(64), bytes: 10 })
+  const events = []
+  ctx.on('free-context/recovery', record => events.push(record))
+  let final
+  ctx.on('tools/result', (observedExec, result) => {
+    assert.equal(Object.isFrozen(observedExec), true)
+    assert.equal(Object.isFrozen(result), true)
+    assert.equal(Object.isFrozen(result.content), true)
+    final = result
+  })
+  const result = await ctx.tools.execute(exec)
+  assert.deepEqual(result, final)
+  assert.equal(result.content[0].text, 'finalized source')
+  assert.equal(events.length, 1)
+  assert.equal(events[0].outcome, 'modified')
+  assert.equal(events[0].verifiedFull, false)
+  assert.equal(events[0].startLine, undefined)
 })

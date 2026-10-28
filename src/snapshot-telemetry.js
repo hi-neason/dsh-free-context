@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import { snapshotReferenceId } from './snapshot.js'
 
 const nonempty = value => typeof value === 'string' && value.length > 0
@@ -8,6 +9,7 @@ const purposes = new Set(['original', 'audit', 'retirement'])
 export function installSnapshotTracking(ctx, { maxEntriesPerSession = 128 } = {}) {
   if (!Number.isSafeInteger(maxEntriesPerSession) || maxEntriesPerSession < 1) throw new RangeError('Invalid maxEntriesPerSession')
   let sessions = new WeakMap()
+  let pending = new WeakMap()
   let disposed = false
   const emit = (event, record) => {
     try { Promise.resolve(ctx.parallel(event, record)).catch(() => {}) } catch {}
@@ -31,14 +33,35 @@ export function installSnapshotTracking(ctx, { maxEntriesPerSession = 128 } = {}
       return reference
     } catch { return undefined }
   }
-  const off = ctx.on('tools/post-execute', async (exec, result, next) => {
-    const decision = await next()
+  // The post hook only captures a baseline: outer policies and tool finalizers may still replace it.
+  const offPost = ctx.on('tools/post-execute', async (exec, result, next) => {
+    let observed
     try {
-      if (disposed || exec.name !== 'read' || exec.parent !== undefined) return decision
-      const reference = sessions.get(owner(exec))?.get(exec.arguments?.file_path)?.reference
-      if (!reference || owner(exec)?.header?.id !== reference.sessionId) return decision
-      const outcome = exec.signal?.aborted ? 'cancelled' : decision.kind !== 'accept' ? 'blocked' :
-        result.isError ? 'failed' : Object.hasOwn(decision, 'value') || Object.hasOwn(decision, 'content') ? 'modified' : 'success'
+      const session = owner(exec)
+      const locator = exec.arguments?.file_path
+      const entry = sessions.get(session)?.get(locator)
+      if (!disposed && exec.name === 'read' && exec.parent === undefined && entry && session.header?.id === entry.reference.sessionId) {
+        observed = { session, locator, entry, result }
+        pending.set(exec, observed)
+      }
+    } catch {}
+    const decision = await next()
+    if (observed) observed.decision = decision
+    return decision
+  }, { prepend: true })
+  const offResult = ctx.on('tools/result', (exec, result) => {
+    const observed = pending.get(exec)
+    pending.delete(exec)
+    try {
+      if (disposed || !observed || owner(exec) !== observed.session ||
+        sessions.get(observed.session)?.get(observed.locator) !== observed.entry) return
+      const { reference } = observed.entry
+      if (observed.session.header?.id !== reference.sessionId) return
+      const { decision, result: original } = observed
+      const outcome = exec.signal?.aborted ? 'cancelled' : decision?.kind === 'block' && result.isError ? 'blocked' :
+        result.isError || original.isError ? 'failed' : !decision || decision.kind !== 'accept' ||
+        Object.hasOwn(decision, 'value') || Object.hasOwn(decision, 'content') ||
+        !isDeepStrictEqual(original.content, result.content) || !isDeepStrictEqual(original.value, result.value) ? 'modified' : 'success'
       const value = result.value
       let range
       if (outcome === 'success' && nonempty(value?.path) && Number.isSafeInteger(value.offset) && value.offset >= 1 &&
@@ -48,8 +71,7 @@ export function installSnapshotTracking(ctx, { maxEntriesPerSession = 128 } = {}
       }
       emit('free-context/recovery', Object.freeze({ ...reference, recoveryCallId: exec.callId, outcome, verifiedFull: false, ...(range ?? {}) }))
     } catch {}
-    return decision
-  }, { prepend: true })
+  })
   function lookup(exec, referenceId) {
     const session = owner(exec)
     if (disposed || typeof referenceId !== 'string') return undefined
@@ -58,9 +80,9 @@ export function installSnapshotTracking(ctx, { maxEntriesPerSession = 128 } = {}
     }
     return undefined
   }
-  function clear() { disposed = true; sessions = new WeakMap() }
+  function clear() { disposed = true; sessions = new WeakMap(); pending = new WeakMap() }
   ctx.effect?.(() => clear)
-  return { record, lookup, dispose() { off?.(); clear() } }
+  return { record, lookup, dispose() { offPost?.(); offResult?.(); clear() } }
 }
 
 /** Use an explicitly host-provided registry, otherwise retain private tracking. */
