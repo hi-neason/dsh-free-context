@@ -61,8 +61,9 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
     if (config.json.enabled) {
       const encoded = encodeJsonRows(block.text, { maxInputBytes: config.maxInputBytes })
       // Codec only accepts object arrays, so its object envelope cannot be encoded twice.
-      if (encoded !== undefined && smaller([{ ...block, text: encoded }])) {
+      if (encoded !== undefined) {
         const replacement = [{ ...block, text: encoded }]
+        if (!smaller(replacement)) return undefined
         const restored = decodeJsonRows(encoded, {
           maxInputBytes: config.maxInputBytes, maxOutputBytes: config.maxInputBytes,
         })
@@ -71,6 +72,9 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
       }
     }
     if (exec.name !== 'read' && config.text.enabled) {
+      // Structured JSON stays on the verified JSON route or remains original.
+      // Exact generic-text decoding alone does not establish field-use quality.
+      try { JSON.parse(block.text); return undefined } catch { /* Non-JSON text may use the generic codec. */ }
       const encoded = encodeLosslessText(block.text, { maxInputBytes: config.maxInputBytes, maxOutputBytes: config.maxInputBytes })
       if (encoded !== undefined) {
         const replacement = [{ ...block, text: encoded }]

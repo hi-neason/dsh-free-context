@@ -6,8 +6,9 @@ import { decodeLosslessText } from '../../src/lossless-text.js'
 const text = 'Repeated operational explanation. '.repeat(500) + '\nMAGIC alpha=>17; omega=>29\n'
 const fixture = { id: 'tool-text-visible', kind: 'acceptance', text, query: 'Call fixture and return MAGIC as JSON.', expected: { alpha: 17, omega: 29 } }
 
-for (const [label, sourceText] of [['plain text', text], ['JSON with an unprofitable rows encoding', JSON.stringify([{ a: text }])]]) {
-test(`official AgentLoop persists ${label} encoding and sends it through tuned native spill`, async () => {
+for (const [label, sourceText, encodedExpected] of [['plain text', text, true],
+  ['JSON with unprofitable rows', JSON.stringify([{ a: 'Repeated operational explanation. '.repeat(40) + '\nMAGIC alpha=>17; omega=>29\n' }]), false]]) {
+test(`official AgentLoop preserves ${label} through the configured tool policy`, async () => {
   const text = sourceText
   const task = { ...fixture, text }
   const observed = []
@@ -21,8 +22,9 @@ test(`official AgentLoop persists ${label} encoding and sends it through tuned n
         else {
           const encoded = visible.content[0].text
           observed.push(encoded)
-          assert.equal(decodeLosslessText(encoded), text)
-          const m = decodeLosslessText(encoded).match(/MAGIC alpha=>(\d+); omega=>(\d+)/)
+          const restored = encodedExpected ? decodeLosslessText(encoded) : encoded
+          assert.equal(restored, text)
+          const m = restored.match(/MAGIC alpha=>(\d+); omega=>(\d+)/)
           block = { type: 'text', text: JSON.stringify({ alpha: +m[1], omega: +m[2] }) }
         }
         yield { type: 'block-start', index: 0, blockType: block.type }
@@ -34,7 +36,7 @@ test(`official AgentLoop persists ${label} encoding and sends it through tuned n
   assert.equal(result.passed, true)
   assert.equal(result.configuration.encodeToolText, true)
   assert.equal(observed.length, 1)
-  assert.ok(result.decisions.some(row => row.strategy === 'tool-lossless-text-v1' && row.outcome === 'selected'))
+  assert.equal(result.decisions.some(row => row.strategy === 'tool-lossless-text-v1' && row.outcome === 'selected'), encodedExpected)
   assert.equal(result.recoveryCalls, 0)
   assert.equal(result.steps, 2)
 })

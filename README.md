@@ -55,7 +55,7 @@ JSON 路由只接收单个纯文本内容块：通过工具允许列表与完整
 
 ### 可选普通工具文本编码
 
-设置 `text: { enabled: true }` 并将工具名加入 `tools` 后，JSON 路由未命中的单文本结果会在日志精简之前尝试 `tool-lossless-text-v1`。例如 `{ mode: 'apply', tools: ['bash'], text: { enabled: true } }` 可以处理重复较多的命令输出。完整候选的序列化字节数与估算 token 均须至少减少 50%，同时满足 `minSavingsTokens`；短文本、缺少重复或节省不足时继续原有路由。
+设置 `text: { enabled: true }` 并将工具名加入 `tools` 后，非 JSON 的单文本结果会在日志精简之前尝试 `tool-lossless-text-v1`。例如 `{ mode: 'apply', tools: ['bash'], text: { enabled: true } }` 可以处理重复较多的命令输出。完整候选的序列化字节数与估算 token 均须至少减少 50%，同时满足 `minSavingsTokens`；短文本、缺少重复或节省不足时继续原有路由。合法 JSON 只采用已校验且达标的 JSON rows 编码，否则保留原文；关闭 JSON 策略也不会绕过它改用通用文本编码。
 
 编码包含该次工具呈现文本的完整字典、文字片段、UTF-8 字节数和 SHA-256，采用前校验精确往返，不调用模型或创建快照。内容块元数据与程序消费的 `value` 保持原样；工具错误、PTC 内部调用和结构化值替换仍跳过，PTC 最终输出可以按允许列表处理。`read` 始终排除在本开关外，读取编码继续使用独立的 `readText` 分类规则。`observe` 只报告候选、不改变模型输入。文本可还原不等于模型任务质量或完整任务 token 收益已通过验证；该选项默认关闭。
 
@@ -886,3 +886,6 @@ JSON 后续策略修复另做了两份独立真实研究，每份四组、每组
 后续编码核算将完整计费与任务成功分别判断：流正常结束、终止类型为 `max-tokens`、且用量完整有效时，新记录会将该调用计入费用及预算；持久化截断 turn 仍使任务质量失败。缺失用量、传输异常、错误终止或异常退出仍拒绝完整核算。历史 `complete=false` 记录和已有失败报告保持原样。官方 CLI 合成回归验证了实际截断 turn、完整用量与预算计入；独立联合汇总即使遇到伪造的成功标记，也会根据持久化 turn 拒绝质量验收。
 
 2026-10-29 核对官方 [Anthropic API](https://api-docs.deepseek.com/guides/anthropic_api) 与 [Thinking Mode](https://api-docs.deepseek.com/guides/thinking_mode)：安装包将 `reasoningEffort: off` 映射为 `thinking.type: disabled`，请求构造与文档一致；没有证据表明该映射导致长篇普通文本。关闭 thinking 不构成普通文本不会含规划的保证；启用 `low` 也尚无本项目完成率或成本改善证据。
+
+
+短 JSON 的负例促成后续格式保护：普通工具文本编码不再接管合法 JSON，包括不适用 rows 的对象、字符串、非规范数值或重复键输入。JSON rows 可用且收益达标时仍采用，否则保持原始表示；非 JSON 重复文本的编码保留。原短 JSON 失败记录不改，这项回退消除了已知有风险的转换路径，不等于新的真实模型验收通过。

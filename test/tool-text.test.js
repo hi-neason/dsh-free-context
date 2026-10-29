@@ -73,20 +73,26 @@ test('text-only plugin registers a policy; observe, errors, PTC internals and va
   }
 })
 
-test('an unprofitable JSON candidate can fall through to exact text compression', () => {
+test('unprofitable JSON rows retain their original representation instead of generic text encoding', () => {
   for (const [rows, minSavingsTokens] of [
     [[{ a: 'A repeated diagnostic explanation. '.repeat(400) }], 0],
     [Array.from({ length: 100 }, () => ({ a: 'A repeated diagnostic explanation. '.repeat(20) })), 1000],
   ]) {
     const originalText = JSON.stringify(rows, null, 2)
     const blocks = [{ type: 'text', text: originalText, customMetadata: 'preserved' }]
-    assert.equal(createContentRouter(config({ text: { enabled: false }, minSavingsTokens }))(blocks, exec()), undefined)
-    const candidate = createContentRouter(config({ minSavingsTokens }))(blocks, exec())
-    assert.equal(candidate?.strategy, 'tool-lossless-text-v1')
-    assert.equal(candidate.lossy, false)
-    assert.equal(candidate.content[0].customMetadata, 'preserved')
-    assert.equal(decodeLosslessText(candidate.content[0].text), originalText)
-    assert.ok(measureContent(candidate.content).bytes * 2 <= measureContent(blocks).bytes)
-    assert.ok(measureContent(blocks).estimatedTokens - measureContent(candidate.content).estimatedTokens >= minSavingsTokens)
+    assert.equal(createContentRouter(config({ minSavingsTokens }))(blocks, exec()), undefined)
+    assert.equal(blocks[0].text, originalText)
+    assert.equal(blocks[0].customMetadata, 'preserved')
+  }
+})
+
+test('generic text encoding does not bypass unsupported or disabled JSON handling', () => {
+  const repeated = 'A repeated diagnostic explanation. '.repeat(400)
+  for (const source of [JSON.stringify({ message: repeated }), JSON.stringify(repeated),
+    JSON.stringify([{ message: repeated }]), `{"a":1,"a":2,"message":${JSON.stringify(repeated)}}`]) {
+    const blocks = [{ type: 'text', text: source }]
+    for (const json of [{ enabled: true }, { enabled: false }]) {
+      assert.equal(createContentRouter(config({ json }))(blocks, exec()), undefined)
+    }
   }
 })
