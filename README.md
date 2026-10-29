@@ -32,6 +32,7 @@ const fiber = await ctx.plugin(FreeContext, {
   json: { enabled: true },
   logs: { enabled: false },
   text: { enabled: false },
+  search: { enabled: false },
 })
 ```
 
@@ -45,6 +46,7 @@ const fiber = await ctx.plugin(FreeContext, {
 | `json.enabled` | `true` | JSON 策略开关 |
 | `logs.enabled` | `false` | 有损日志策略开关，默认关闭 |
 | `text.enabled` | `false` | 对允许列表中的非 `read` 工具结果尝试自包含无损文本编码 |
+| `search.enabled` | `false` | 对允许列表中的非 `read` 工具结果尝试严格限定的 grep/rg 路径字典编码 |
 | `readText.enabled` | `false` | 对明确属于源文件的 `read` 文本尝试可逆编码；需要宿主分类服务及原文存储 |
 | `readText.encodeArtifacts` | `false` | 配合 `readText.enabled`，对宿主确认的 artifact 读取输出自包含可逆 frame，不创建新快照 |
 | `retirement.enabled` | `false` | 历史结果退场；具有独立工具允许列表和经济门槛，见下文 |
@@ -58,6 +60,27 @@ JSON 路由只接收单个纯文本内容块：通过工具允许列表与完整
 设置 `text: { enabled: true }` 并将工具名加入 `tools` 后，非 JSON 的单文本结果会在日志精简之前尝试 `tool-lossless-text-v1`。例如 `{ mode: 'apply', tools: ['bash'], text: { enabled: true } }` 可以处理重复较多的命令输出。完整候选的序列化字节数与估算 token 均须至少减少 50%，同时满足 `minSavingsTokens`；短文本、缺少重复或节省不足时继续原有路由。合法 JSON 只采用已校验且达标的 JSON rows 编码，否则保留原文；关闭 JSON 策略也不会绕过它改用通用文本编码。
 
 编码包含该次工具呈现文本的完整字典、文字片段、UTF-8 字节数和 SHA-256，采用前校验精确往返，不调用模型或创建快照。内容块元数据与程序消费的 `value` 保持原样；工具错误、PTC 内部调用和结构化值替换仍跳过，PTC 最终输出可以按允许列表处理。`read` 始终排除在本开关外，读取编码继续使用独立的 `readText` 分类规则。`observe` 只报告候选、不改变模型输入。文本可还原不等于模型任务质量或完整任务 token 收益已通过验证；该选项默认关闭。
+
+### 可选搜索结果编码
+
+设置 `{ mode: 'apply', tools: ['bash'], search: { enabled: true } }` 后，可对单文本 grep/rg 输出尝试 `search-paths-v1`。编码仅将重复路径提取为字典，保留每一行的原始行号写法、匹配行 `:` 与上下文行 `-` 的区别、正文、顺序、`--` 分组分隔符及 LF/CRLF/末行无换行。完整 frame 另含程序计算的 `matches`（仅匹配行数量，不含上下文/分组）、UTF-8 字节数与 SHA-256，解码逐行复核计数并校验精确往返；不创建快照、不调用辅助模型、不改变结构化 `value`。
+
+该语法要求至少一条 `path:行号:正文` 匹配行，允许无歧义的 `path-行号-正文` 上下文行；未知行、ANSI/控制字符、BOM、包含冒号或反斜杠的路径，以及含歧义数字分隔符的行均拒绝。它不是通用 grep/rg 格式解析器，不能证明搜索范围完整。合法 JSON 保留原 JSON 路由，`read` 不使用此策略。
+
+候选计入完整内容块后，字节数与估算 token 都须严格减少且达到 `minSavingsTokens`；此策略不要求通用文本编码的 50% 门槛。两种编码同时开启时，比较各自达标候选的估算 token，再以字节数打破平局；搜索编码不适用时仍可尝试其他已启用策略。默认关闭。精确可逆只证明当次工具文本可还原，尚未证明真实模型的任务质量或累计 token 收益。
+
+独立编解码接口为 `dsh-free-context/search` 的 `encodeSearchResults(text, { maxInputBytes, maxOutputBytes })` 与 `decodeSearchResults(frame, { maxInputBytes, maxOutputBytes })`，两项预算默认均为 1 MiB。编码不适用时返回 `undefined`；解码拒绝无效或超预算 frame。
+
+### 2026-10-29 搜索策略限定实测：质量门槛未通过
+
+官方 rc.2 AgentLoop、真实 `deepseek-flash`；两个本仓库实际 rg 输出，每组各重复两次。每个完整任务包含匹配计数和后续精确行号查询，累计 token 包含所有阶段、缓存/非缓存输入、输出及回读。三组原生 spill 上限为 12500/1200/1200，插件先处理结果。下表同时保留失败任务的用量：
+
+| 版本 | 默认原生：通过数 / token | 调优原生：通过数 / token | 插件：通过数 / token |
+| --- | --- | --- | --- |
+| 初版路径字典 | 0/4 · 32,699 | 2/4 · 36,118 | 2/4 · 21,343 |
+| 增加已校验 `matches` | 4/4 · 47,084 | 3/4 · 53,964 | 3/4 · 23,617 |
+
+初版存在模型计数错误及非 JSON 回答。复测沿用完全相同的原材料、提问与验收答案；即使提供确定性 `matches: 28`，插件仍有一次回答 27。不得据 token 下降宣称质量不降或普遍净收益，搜索策略继续作为默认关闭的实验选项。两批 24 次任务均有完整 provider usage，共计费用估算 $0.029306688（沿用统一峰值报价，非账单）；没有辅助压缩调用。首批缺少独立末尾源码哈希记录；复测确认冻结源码与完成时哈希一致。旧失败记录保持原样，不以复测覆盖。
 
 ### 2026-10-28 文本策略限定实测
 
@@ -94,6 +117,19 @@ ctx.on('free-context/decision', record => {
 `observe` 会计算候选并报告 `observed`，保持原决策不变；`apply` 选择候选时报告 `selected`。这些结果只代表插件策略选择，不证明 Session 已写入、宿主已接受或已经产生计费收益；诊断期间取消或等待超过默认 1 秒时仍保留原决策；普通观察者异常会被隔离。独立 `createPostExecuteHandler` 可通过 `diagnosticsTimeoutMs` 设置等待期限。没有适用或达到门槛的候选时记录 `eligible/no-strategy`。失败、阻止决策、结构化值替换、取消和 PTC 内部调用报告跳过原因，不扫描其内容。`off`、空工具列表或全部策略关闭时不注册监听器，也不产生诊断。
 
 字节数按内容块 JSON 序列化后的 UTF-8 计算，包含块结构开销；默认 token 估算为 `ceil(bytes / 3)`，只是启发式估算，不是精确 tokenizer、媒体 token 计量、provider usage 或实际计费，也不是已节省 token。`elapsedMs` 不含下游工具策略和诊断订阅方耗时。日志候选正文包含原文快照引用；候选诊断通过受控标识关联快照与实际回读事件，详见下文快照诊断说明。
+
+主插件的即时内容路由可在安装前接入宿主提供的模型相关估算器：
+
+```js
+ctx.provide('freeContextTokenEstimator', {
+  estimate(serializedContent) {
+    return tokenizer.encode(serializedContent).length // tokenizer 由宿主提供。
+  },
+})
+// 随后 ctx.plugin(FreeContext, config)。
+```
+
+`estimate` 接收完整内容块的 JSON 字符串，必须同步返回非负安全整数；Promise、异常或无效数值使本次转换保留原文，服务存在但没有 `estimate` 方法则安装报错。主插件在安装时绑定估算方法，原文与候选使用同一方法；更换模型、服务或方法时需要卸载并重新安装插件，宿主也应保持已绑定 tokenizer 的语义稳定。诊断标记为 `host-serialized-content-estimator`。此服务目前只用于主插件即时路由，不自动替换历史退场和独立实验的估算；估算完整消息包装及实际计费仍需 provider usage，不能仅凭 tokenizer 结果声称完整任务已获益。
 
 事件使用 Cordis `parallel` 分发到普通 `ctx.on` 订阅，等待全部订阅完成，以隔离异步拒绝；监听器异常只产生固定警告，不改变工具结果。订阅方应快速完成，避免延迟工具结果返回。
 
@@ -190,19 +226,26 @@ const recall = installSnapshotRecovery(ctx, {
   readPage: async (locator, { offset, length, signal }) =>
     ctx.fs.readByteRange(await ctx.fs.resolve(locator, { signal }), { offset, length }, signal),
   pageCharacters: 2048,
+  maxBatchCharacters: 8192,
 })
 // 然后通过 ctx.plugin 加载主插件/实验；结束时 recall.dispose()。
 ```
 
 `free_context_recall` 只接受当前 Session 登记的 `referenceId` 和字符范围，不接受模型提交的 locator 或 receipt。主插件的快照提示包含相同 ID。每次返回前校验完整快照，按 Unicode 码点分页，JSON 字符串保持 CRLF、BOM 与 emoji；沿 `nextOffset` 读取到 `null`。`snapshotVerified` 表示内部完整字节校验成功，`pageComplete` 才表示本页包含全文。引用过期、内容改变、错误会话、取消或超出预算均失败，不改读当前源文件。
 
-该工具不是根插件默认安装项。登记表有界且仅属于当前 Session 对象；重启、恢复或 fork 不自动获得原登记表的授权。宿主需先确认后端权限，再显式重新登记，不能仅凭日志中出现 ID 就授予访问。已有官方 AgentLoop 测试验证真实插件产生的快照进入同一登记表、模型逐页回读及持久化文本重放；脚本化 provider 验证协议，不代表真实模型推理收益。
+单页参数仍为 `{ referenceId, offset, limit }`，其中 `offset` 默认 0，`limit` 默认 `pageCharacters`。也可在一次调用中提交 `{ referenceId, ranges: [{ offset: 0, limit: 512 }, { offset: 2048, limit: 512 }] }`，返回共享快照元数据与按请求顺序排列的 `pages`。`ranges` 不能与顶层 `offset/limit` 混用，每批 1–16 段，每段必须显式提供范围且 `limit` 不超过 `pageCharacters`（默认 2048、硬上限 4096）。各段请求的 `limit` 总和不得超过 `maxBatchCharacters`（默认 8192、硬上限 16384）；重叠区间和超过文件尾的请求额度也计入。任一范围不合法时整批失败。
+
+同一次批量调用只进行一轮完整快照读取与字节/哈希校验，再从已验证文本切出各段；不同调用仍各自校验。批量恢复减少多范围查询的工具往返机会，不保证主模型少读原文或完整任务费用下降。
+
+该工具不是根插件默认安装项。登记表默认每个 Session 最多 128 条，且仅属于当前 Session 对象；淘汰后旧 ID 不再由该登记表授权，重启、恢复或 fork 不自动获得原登记表的授权。宿主需先确认后端权限，再显式重新登记，不能仅凭日志中出现 ID 就授予访问。已有官方 AgentLoop 测试验证真实插件产生的快照进入同一登记表、模型逐页回读及持久化文本重放；脚本化 provider 验证协议，不代表真实模型推理收益。
 
 ## 快照与回读诊断关联
 
 产生原文快照的主插件路径与独立实验会登记 `free-context/snapshot`；候选的 `free-context/decision.snapshots` 关联相同引用。事件仅含不透明 `referenceId`（locator 与 SHA-256 的哈希）、`sha256`、`bytes`、`sourceCallId`、`sessionId` 和 `purpose`（`original`、`audit`、`retirement`），不含 locator、恢复提示、原文或工具参数。归档记录不等于候选已采用。
 
-`free-context/recovery` 只观察同一 Session 对象中、`read.file_path` 精确等于已登记 locator 的现有 read 调用，报告 `recoveryCallId`、原引用及 `success/failed/blocked/modified/cancelled` 状态；成功且返回结构有效时附实际 `startLine/endLine/totalLines`。不推断别名，不重新读取源文件，也不提供额外恢复工具。所有事件均为 `verifiedFull: false`：返回全部行仍不能证明原始换行、字节数和哈希完全一致，更不能证明模型使用了这些内容。诊断在 `tools/post-execute` 捕获基线，于 `tools/result` 观察冻结的最终工具结果；这不证明 Session 持久化或后续模型请求消费了该内容。观察者异常不改变工具决策。
+`free-context/recovery` 观察同一 Session 对象中两类已登记恢复调用：`read.file_path` 精确等于 locator，或 `free_context_recall.referenceId` 匹配登记条目。事件报告 `recoveryCallId`、原引用及 `success/failed/blocked/modified/cancelled` 状态；成功且结构有效的 read 返回附 `startLine/endLine/totalLines`，recall 返回附 `recoveryTool`、`characterRanges`（零起点、结束位置不包含）、`returnedCharacters`、`totalCharacters` 与 `reportedSnapshotVerified: true`。不推断路径别名，不额外读取原文，不在事件中记录正文或 locator。
+
+诊断在 `tools/post-execute` 捕获基线，于 `tools/result` 检查冻结的最终工具结果；后续策略修改了内容或结构化值时报告 `modified`，不发布成功范围。所有事件仍为 `verifiedFull: false`：read 全部行不能证明原始字节一致，recall 的 `reportedSnapshotVerified` 也只是对工具报告的核对，不是遥测独立重验，更不证明 Session 已持久化或模型已消费这些内容。观察者异常不改变工具决策。
 
 `installSnapshotTracking(ctx, { maxEntriesPerSession: 128 })` 从 `dsh-free-context/snapshot-telemetry` 导出，返回 `record(exec, receipt, purpose)` 与 `dispose()`。登记表按 Session 对象弱引用隔离并限制条目数；淘汰或卸载只删除诊断元数据。恢复/fork 不自动重建表。只有目标 Session 的 ID 与 receipt.sessionId 一致时才可显式重新登记；新 ID 的 fork 不能登记父会话 receipt，但原文能否读取仍由后端权限决定。存储权限与保留期限仍由宿主负责。
 
@@ -314,6 +357,18 @@ ctx.provide('freeContextTaskState', {
 ```js
 import * as Experiments from 'dsh-free-context/experiments'
 
+// 宿主在工具产出时，仅为已确认的纯说明文本登记精确来源。
+// key: JSON.stringify([sessionId, callId])；value 含下列 request 的全部字段。
+// sha256 必须由当次工具呈现文本计算，不能从随后变化的文件重读推断。
+const trustedProseSources = new Map()
+ctx.provide('freeContextContentClassifier', {
+  classify(request) {
+    const known = trustedProseSources.get(JSON.stringify([request.sessionId, request.callId]))
+    const approved = known && Object.keys(request).every(key => known[key] === request[key])
+    return { ...request, kind: approved ? 'prose' : 'unknown', complete: approved === true }
+  },
+})
+
 const experimentConfig = {
   mode: 'observe',
   tools: ['prose'], // 换为明确返回纯说明文本的实际工具；精确允许列表。
@@ -350,13 +405,17 @@ const experiment = await ctx.plugin(Experiments, experimentConfig)
 
 `maxInputBytes` 限制原输入，`maxPromptBytes` 限制完整请求消息序列化后的 UTF-8 字节数，不能等同模型输入 token 硬上限；`maxOutputBytes` 包括输出文本与 reasoning 流的字节数，`maxOutputTokens` 传给宿主请求的 `maxTokens`。`maxArtifactBytes` 限制调用审计文件。明确的代码围栏、JSON、TAP、列表及其他已识别结构保留原文，纯说明文本允许列表本身仍需调用方正确配置。
 
+任务无关和查询相关模式现在额外要求同步 `freeContextContentClassifier.classify(request)` 服务。冻结的 request 包含 `toolName`、`callId`、`sessionId`、`readPath`（仅 read 有可用路径时赋值）和当次工具文本的 `sha256`。仅接受 `kind: 'prose'`、`complete: true` 且这些字段逐项相同的答复；服务缺失、unknown/source、绑定不符、异常或 Promise 均以 `content-not-prose` 保留原文，且不调用辅助模型或写快照。允许列表本身不再足以把混合用途的 read/bash 输出归类为 prose。服务应为无外部 I/O、无副作用的同步判断；归档后、辅助调用后及最终采用前再次验证，分类撤回、服务替换或执行身份改变会使候选失效。调用后撤回不能消除已经发生的费用。诊断模式仍由独立的严格诊断语法准入，不要求 prose 声明；分类声明也不证明选段语义完整。
+
+从旧版本迁移时，已启用 prose 实验的宿主必须注册上述服务；没有可信来源证据时保持 unknown。示例登记表由宿主负责按会话和调用维护、限制大小及清理，不能把全部工具输出无条件声明为 prose。原默认 `mode: 'off'` 不变。
+
 模型仅返回 `selectedIds`；插件拒绝额外字段、改写文本、重复或越界 ID、空选择、未成功结束的流和遗漏保护词所在段落的选择。候选文本按原顺序从原文抽取，附段落 ID、UTF-16 起止位置与策略版本。来源匹配只证明这些片段来自原文，不证明未选段落没有必要证据。
 
-**`observe` 也会产生辅助模型费用并写入快照**，只是保持模型输入不变。插件先以纯准备阶段检查格式、分段、实际 prompt 字节和包含完整请求的 manifest 最低大小；这些检查不写存储、不调用模型。通过后保存原文，成功选择后保存会话归属的审计 manifest（完整 prompt、response、原始与本次 usage、选择范围和预算），候选附两份真实恢复引用。只有包含引用的完整候选仍缩小，并通过净收益门槛时，`apply` 才选择替换模型可见工具内容；不改程序结构化值，也不直接改写主 Agent 请求或历史日志。存储失败或取消均保留原文，已写快照由宿主后端清理。
+**`observe` 也会产生辅助模型费用并写入快照**，只是保持模型输入不变。插件先以纯准备阶段检查格式、分段、实际 prompt 字节和包含完整请求的 manifest 最低大小；单段落或全部段落必须保留时以 `no-selection-room` 拒绝，零辅助调用、零快照。随后用最小合法选段的体积下界检查大小及预测收益，已确定无法达到门槛的请求也在写入与调用之前拒绝。通过后保存原文，成功选择后保存会话归属的审计 manifest（完整 prompt、response、原始与本次 usage、选择范围和预算），候选附两份真实恢复引用。只有包含引用的完整候选仍缩小，并通过净收益门槛时，`apply` 才选择替换模型可见工具内容；不改程序结构化值，也不直接改写主 Agent 请求或历史日志。存储失败或取消均保留原文，已写快照由宿主后端清理。
 
 `free-context/experiment` 事件只报告调用标识、模式、原因、用量、估算费用与缓存命中，不报告正文、工具参数或密钥。缓存按会话对象隔离，键包含完整原文哈希和模型/策略配置，每个会话最多保存 `maxCacheEntries` 项。命中时复用经过校验的选择，`originUsage` 表示原选择调用用量，`callUsage` 缺省且 `llmCalled: false` 表示本次没有新调用，不能再次计费。相同 Session、配置、原文和查询的并发选择合并为一次模型调用；各等待方独立取消，最后一方退出才中止底层请求。一次调用的 `callUsage` 只归因到一个存活等待方，其他方以 `shared: true`、`llmCalled: false` 表示无新增费用，保留 `originUsage`；超时或取消后，尚未结束的底层流继续占用 `maxInFlight` 名额；已完成的缓存命中不占调用名额。取消不能保证远端停止计费，缺少 usage 仍禁止采用。
 
-纯选择核心也可从 `dsh-free-context/text-selection` 导入 `createTextSelector`；原 callable 接口保留，另提供 `select.prepare(input)` 和 `select.execute(token, { session, signal })`。准备 token 仅在创建它的 selector 中有效，暴露 `requestBytes` 和 `minimumManifestBytes` 供调用前拒绝；最低大小通过后，完整 manifest 仍须通过最终预算。独立调用者需自行完成归档与经济门槛。
+纯选择核心也可从 `dsh-free-context/text-selection` 导入 `createTextSelector`；原 callable 接口保留，另提供 `select.prepare(input)` 和 `select.execute(token, { session, signal })`。准备 token 仅在创建它的 selector 中有效，暴露 `requestBytes`、`minimumManifestBytes` 和 `minimumSelectionBytes` 供调用前拒绝。最后一项是最小合法选段正文经 JSON 转义后的字节下界，不含内容块包装和恢复引用，也不是精确 token 数；插件补上内容块包装再做前置估算，实际完整候选和 manifest 仍须通过最终预算。独立调用者继续负责可信内容分类、归档和经济门槛；纯核心没有宿主服务依赖。
 
 已用官方 dsh runtime/provider 和 `deepseek-flash` 完成一次合成文本观察探针：实际输入 4,224 token、输出 9 token，保留保护段落；第二次命中缓存且无新模型调用，两次均保持原工具内容。该探针和 fake-adapter 集成测试验证了接口、归档、保护规则及失败边界，不是完整任务质量或账单收益证明；演示价格换算不等于供应商实收。
 
