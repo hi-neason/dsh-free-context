@@ -6,6 +6,8 @@ DeepSeek Harness（dsh）的独立上下文优化插件，目标是在保持 Age
 
 ## 接入
 
+可先在本仓库运行 `npm pack --ignore-scripts` 生成本地安装包，再在宿主 profile 或集成项目中运行 `npm install /absolute/path/dsh-free-context-0.1.0.tgz`。需要 Node.js 24 及下文指定的兼容 dsh 运行时。集成测试使用实际打包产物、离线安装和包内公开导出，通过官方 CLI 验证插件加载、原生 spill 组合、Session 恢复及策略关闭；测试还检查安装包不包含本地记忆、研究资料或凭据。该测试使用合成模型响应，不代表真实模型净收益。
+
 在已加载 `tools` 服务的 Cordis 上下文中加载命名导出：
 
 ```js

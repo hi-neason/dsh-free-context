@@ -1,23 +1,42 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join, resolve, sep } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { test } from 'node:test'
 
 const exec = promisify(execFile)
+const npm = (args, options) => process.env.npm_execpath
+  ? exec(process.execPath, [process.env.npm_execpath, ...args], options) : exec('npm', args, options)
 const runtime = resolve(process.env.DSH_CLI_RUNTIME_ROOT ?? '.omx/cli-runtime')
 const bin = join(runtime, 'node_modules/@deepseek-ai/dsh/lib/bin.js')
-const plugin = fileURLToPath(new URL('../../src/index.js', import.meta.url))
+const repository = fileURLToPath(new URL('../..', import.meta.url))
 const fixture = fileURLToPath(new URL('../fixtures/cli-provider.js', import.meta.url))
 const jsonLines = text => text.trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
 
-test('official CLI composes plugin before tuned native spill, resumes persisted history and exits with policy off', { timeout: 120000 }, async t => {
+test('official CLI loads the packed package, composes before native spill, resumes and disables', { timeout: 120000 }, async t => {
   assert.equal(JSON.parse(await readFile(join(runtime, 'node_modules/@deepseek-ai/dsh/package.json'))).version, '0.2.1-rc.2')
-  const directory = await mkdtemp(join(tmpdir(), 'free-context-cli-'))
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'free-context-cli-')))
   t.after(() => rm(directory, { recursive: true, force: true }))
+  const packed = JSON.parse((await npm(['pack', '--offline', '--ignore-scripts', '--json', '--pack-destination', directory],
+    { cwd: repository, timeout: 20000, maxBuffer: 1024 * 1024 })).stdout)[0]
+  assert.ok(packed.files.every(({ path }) => !['AGENTS.md', 'MEMORY.md'].includes(path) && !path.startsWith('docs/') && !path.startsWith('.omx/')))
+  const installed = join(directory, 'installed')
+  await mkdir(installed)
+  await writeFile(join(installed, 'package.json'), JSON.stringify({ private: true, type: 'module' }))
+  await npm(['install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock',
+    '--prefix', installed, join(directory, packed.filename)], { timeout: 20000, maxBuffer: 1024 * 1024 })
+  const installedPackage = join(installed, 'package.json')
+  const installedRequire = createRequire(installedPackage)
+  const plugin = installedRequire.resolve('dsh-free-context')
+  assert.ok(plugin.startsWith(join(installed, 'node_modules', 'dsh-free-context') + sep))
+  const manifest = JSON.parse(await readFile(join(installed, 'node_modules/dsh-free-context/package.json')))
+  for (const exported of Object.keys(manifest.exports)) {
+    await import(pathToFileURL(installedRequire.resolve('dsh-free-context' + exported.slice(1))).href)
+  }
   const home = join(directory, 'home')
   const profile = join(home, 'profiles/headless')
   await mkdir(profile, { recursive: true })
@@ -41,7 +60,7 @@ test('official CLI composes plugin before tuned native spill, resumes persisted 
   ].join('\n')
   await writeFile(patch, patchText)
   const evidence = join(directory, 'evidence.jsonl')
-  const env = { PATH: process.env.PATH, HOME: directory, DSH_HOME: home, DSH_AGENTS_HOME: join(directory, 'agents'), DSH_TELEMETRY_DISABLED: '1', DSH_CLI_RUNTIME_PACKAGE: join(runtime, 'package.json'), DSH_CLI_EVIDENCE: evidence }
+  const env = { PATH: process.env.PATH, HOME: directory, DSH_HOME: home, DSH_AGENTS_HOME: join(directory, 'agents'), DSH_TELEMETRY_DISABLED: '1', DSH_CLI_RUNTIME_PACKAGE: join(runtime, 'package.json'), DSH_CLI_PLUGIN_PACKAGE: installedPackage, DSH_CLI_EVIDENCE: evidence }
   async function run(args = [], mode = 'apply') {
     const result = await exec(process.execPath, [bin, '--profile', 'headless', '--patch', patch, '--json', ...args, 'Inspect the fixed dataset'], { cwd: directory, env: { ...env, DSH_CLI_EXPECT_MODE: mode }, timeout: 45000, killSignal: 'SIGKILL', maxBuffer: 2 * 1024 * 1024 })
     const events = jsonLines(result.stdout)

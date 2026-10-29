@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { appendFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { decodeJsonRows, encodeJsonRows } from '../../src/json-codec.js'
+const installed = createRequire(process.env.DSH_CLI_PLUGIN_PACKAGE)
+const { decodeJsonRows, encodeJsonRows } = await import(pathToFileURL(installed.resolve('dsh-free-context/json')).href)
 const runtime = createRequire(process.env.DSH_CLI_RUNTIME_PACKAGE)
 const { LlmAdapter } = await import(pathToFileURL(runtime.resolve('@deepseek-ai/dsh-llm')).href)
 const { defineContentToolFixture } = await import(pathToFileURL(runtime.resolve('@deepseek-ai/dsh-tools')).href)
