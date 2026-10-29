@@ -7,6 +7,32 @@ const usage = { inputTokens: 100, outputTokens: 10, cacheReadTokens: 20, cacheWr
 const config = llm => ({ llm, provider: 'explicit-provider', model: 'explicit-model', maxInputBytes: 10000,
   maxPromptBytes: 20000, maxOutputBytes: 2000, maxOutputTokens: 200,
   timeoutMs: 1000, maxParagraphs: 20, maxCacheEntries: 2, protectedTerms: ['KEEP'] })
+
+test('preparation rejects single-span and entirely required selections without calling the model', async () => {
+  for (const text of ['A single paragraph must remain whole.', 'KEEP first paragraph.\n\nKEEP second paragraph.']) {
+    const llm = runtime()
+    const select = createTextSelector(config(llm))
+    const result = await select({ kind: 'prose', text })
+    assert.equal(result.status, 'declined')
+    assert.equal(result.reason, 'no-selection-room')
+    assert.equal(llm.calls.length, 0)
+  }
+})
+
+test('preparation exposes a conservative escaped selection bound for all legal subsets', async () => {
+  const text = 'First paragraph contains "quotes" and 中文.\n\nKEEP mandatory evidence.\n\nOptional third paragraph.'
+  for (const protectedTerms of [[], ['KEEP']]) {
+    for (const selectedIds of [['p2'], ['p1', 'p2'], ['p2', 'p3'], ['p1', 'p2', 'p3']]) {
+      const llm = runtime(JSON.stringify({ selectedIds }))
+      const select = createTextSelector({ ...config(llm), protectedTerms })
+      const prepared = select.prepare({ kind: 'prose', text })
+      const result = await select.execute(prepared)
+      assert.equal(result.status, 'selected')
+      assert.ok(prepared.minimumSelectionBytes > 0)
+      assert.ok(prepared.minimumSelectionBytes <= Buffer.byteLength(JSON.stringify(result.text)) - 2)
+    }
+  }
+})
 function runtime(response = '{"selectedIds":["p2"]}', settings = {}) {
   const calls = []
   return { calls, stream(request) {
@@ -286,7 +312,7 @@ test('diagnostic omission and optional protected terms fail closed; unknown form
     assert.equal((await select({ kind: 'diagnostic', text: diagnostics })).reason, 'protected-diagnostic-omitted')
   }
   const protectedSelect = createTextSelector({ ...diagnosticOptions(runtime('{"selectedIds":["d1","d3","d4"]}')), protectedTerms: ['ordinary'] })
-  assert.equal((await protectedSelect({ kind: 'diagnostic', text: diagnostics })).reason, 'protected-diagnostic-omitted')
+  assert.equal((await protectedSelect({ kind: 'diagnostic', text: diagnostics })).reason, 'no-selection-room')
   const llm = runtime()
   assert.equal((await createTextSelector(diagnosticOptions(llm))({ kind: 'diagnostic', text: diagnostics + '\n\nunknown result' })).reason, 'unrecognized-diagnostic-block')
   assert.equal(llm.calls.length, 0)
@@ -550,8 +576,9 @@ test('encoded diagnostics retain all required IDs, exact source metadata and omi
 
 test('encoding savings must cover decoder instructions as part of the full request', async () => {
   const { encodeSourceSpans } = await import('../src/selector-prompt.js')
-  const text = 'Repeated moderately long sentence. '.repeat(5)
-  const spans = [{ id: 'p1', text }]
+  const repeated = 'Repeated moderately long sentence. '.repeat(5)
+  const text = repeated + '\n\nOptional background.'
+  const spans = [{ id: 'p1', text: repeated }, { id: 'p2', text: 'Optional background.' }]
   assert.ok(JSON.stringify(encodeSourceSpans(spans)).length < JSON.stringify(spans).length)
   const hosts = [runtime('{"selectedIds":["p1"]}'), runtime('{"selectedIds":["p1"]}')]
   for (const [index, promptEncoding] of ['plain', 'auto'].entries()) {
@@ -561,7 +588,7 @@ test('encoding savings must cover decoder instructions as part of the full reque
 })
 
 test('failed codec invariants visibly decline before any paid plain fallback', async t => {
-  const text = 'Repeated source evidence. '.repeat(60)
+  const text = 'Repeated source evidence. '.repeat(60) + '\n\nOptional background.'
   const llm = runtime('{"selectedIds":["p1"]}')
   const select = createTextSelector({ ...config(llm), promptEncoding: 'auto', protectedTerms: [] })
   for (const implementation of [() => 'corrupted', () => { throw new Error('codec failure') }]) {

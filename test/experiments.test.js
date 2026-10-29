@@ -26,9 +26,10 @@ function setup(overrides = {}, behavior = {}) {
     return { locator: `spill://fixture/${saves.length}`, bytes: Buffer.byteLength(input.content), retrievalHint: 'Use exact snapshot.' }
   } }
   let handler
+  const classifier = { classify: request => ({ ...request, kind: 'prose', complete: true }) }
   const ctx = {
     on: (_event, callback) => { handler = callback }, logger: { warn() {} },
-    get: name => name === 'freeContextQuery' ? behavior.queryProvider : name === 'spillStore' && !behavior.noStore ? store : undefined,
+    get: name => name === 'freeContextContentClassifier' ? (Object.hasOwn(behavior, 'classifier') ? behavior.classifier : classifier) : name === 'freeContextQuery' ? behavior.queryProvider : name === 'spillStore' && !behavior.noStore ? store : undefined,
     parallel: async (event, record) => { if (['free-context/experiment', 'free-context/decision'].includes(event)) events.push({ event, record }); await behavior.onReport?.(event) },
     llm: { async * stream(request) {
       calls.push(request)
@@ -45,6 +46,65 @@ function setup(overrides = {}, behavior = {}) {
   plugin.apply(ctx, settings(overrides))
   return { handler, events, saves, calls }
 }
+
+test('prose experiments require a trusted source-bound classification before snapshots or model calls', async () => {
+  const code = Array.from({ length: 80 }, (_, i) => `def operation_${i}(amount):\n    return amount + ${i}`).join('\n\n')
+  for (const classifier of [undefined, { classify: request => ({ ...request, kind: 'source', complete: true }) },
+    { classify: request => ({ ...request, kind: 'unknown', complete: true }) },
+    { classify: request => ({ ...request, kind: 'prose', complete: false }) },
+    { classify: request => ({ ...request, kind: 'prose', complete: true, sha256: 'a'.repeat(64) }) },
+    ...['toolName', 'callId', 'sessionId', 'readPath'].map(key => ({ classify: request => ({ ...request, kind: 'prose', complete: true, [key]: 'different' }) })),
+    { classify: async request => ({ ...request, kind: 'prose', complete: true }) },
+    { classify: () => Promise.reject(new Error('private async failure')) },
+    { classify() { throw new Error('private classification failure') } }]) {
+    const f = setup({ maxParagraphs: 100 }, { classifier })
+    const original = { content: [{ type: 'text', text: code }], value: { path: '/project/main.py' }, isError: false }
+    const decision = { kind: 'accept' }
+    assert.equal(await f.handler(execution(), original, async () => decision), decision)
+    assert.equal(f.calls.length, 0)
+    assert.equal(f.saves.length, 0)
+  }
+})
+
+test('classification binds read metadata and source hash, and is rechecked after asynchronous observers', async () => {
+  let allowed = true
+  const requests = []
+  const behavior = { classifier: { classify(request) {
+    requests.push(request)
+    return { ...request, kind: allowed ? 'prose' : 'source', complete: true }
+  } }, async onReport(event) { if (event === 'free-context/decision') { await Promise.resolve(); allowed = false } } }
+  const f = setup({}, behavior)
+  const original = result(); original.value.path = '/project/evidence.txt'
+  const decision = { kind: 'accept' }
+  assert.equal(await f.handler(execution(), original, async () => decision), decision)
+  assert.equal(f.calls.length, 1)
+  assert.ok(requests.length >= 4)
+  assert.equal(Object.isFrozen(requests[0]), true)
+  assert.deepEqual(requests[0], { toolName: 'read', callId: 'call-1', sessionId: 'session-1',
+    readPath: '/project/evidence.txt', sha256: createHash('sha256').update(text).digest('hex') })
+  assert.deepEqual(original.value, { unchanged: true, path: '/project/evidence.txt' })
+})
+
+test('classification revocation during snapshot storage prevents the auxiliary call', async () => {
+  const behavior = { onSave() { behavior.classifier = undefined } }
+  const f = setup({}, behavior)
+  const decision = { kind: 'accept' }
+  assert.equal(await f.handler(execution(), result(), async () => decision), decision)
+  assert.equal(f.calls.length, 0)
+  assert.equal(f.saves.length, 1)
+  assert.equal(f.events.find(event => event.event === 'free-context/experiment').record.reason, 'content-classification-changed')
+})
+
+test('impossible selection savings decline before model calls and snapshot writes', async () => {
+  for (const [input, overrides] of [[text, { protectedTerms: ['Paragraph'] }],
+    ['One uninterrupted descriptive paragraph. '.repeat(100), {}], [text, { minSavingsTokens: 100000 }]]) {
+    const f = setup(overrides)
+    const decision = { kind: 'accept' }
+    assert.equal(await f.handler(execution(), { content: [{ type: 'text', text: input }], isError: false }, async () => decision), decision)
+    assert.equal(f.calls.length, 0)
+    assert.equal(f.saves.length, 0)
+  }
+})
 
 test('disabled defaults make no hook or model calls; active configuration is strict and frozen', () => {
   plugin.apply({ on: () => assert.fail('disabled') })
@@ -282,13 +342,14 @@ test('completed cache evidence removes fresh-call admission fee without another 
 })
 
 test('a candidate cannot claim savings when native cap makes baseline and candidate equally small', async () => {
-  // Large synthetic horizon permits preflight only; the post-call comparator
-  // must still reject zero incremental savings at the declared one-token cap.
+  // Even the smallest legal selection reaches this cap, so reject before a
+  // model call regardless of the declared synthetic horizon.
   const f = setup({ comparatorTokenCap: 1, minimumFutureRequests: 1000000 })
   const output = await f.handler(execution(), result(), async () => ({ kind: 'accept' }))
-  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls.length, 0)
+  assert.equal(f.saves.length, 0)
   assert.equal(output.content, undefined)
-  assert.equal(f.events.find(event => event.event === 'free-context/experiment').record.reason, 'insufficient-net-benefit')
+  assert.equal(f.events.find(event => event.event === 'free-context/experiment').record.reason, 'no-predicted-benefit-before-call')
 })
 test('eviction while archiving a captured cache hit cannot turn it into a new paid call', async () => {
   let evict = false

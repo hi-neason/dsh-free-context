@@ -29,6 +29,9 @@ async function setup(t, behavior = {}) {
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  if (!behavior.noClassifier) ctx.provide('freeContextContentClassifier', {
+    classify: request => ({ ...request, kind: request.toolName === 'prose' ? 'prose' : 'unknown', complete: true }),
+  })
   if (behavior.getQuery) ctx.provide('freeContextQuery', { getQuery: behavior.getQuery })
   if (!behavior.noStore) await ctx.plugin(SpillLocal, { root, cleanupPeriodDays: 0 })
   const calls = []
@@ -51,6 +54,24 @@ async function setup(t, behavior = {}) {
   const exec = { name: 'prose', callId: 'prose-call', arguments: {}, agent: { session: { header: { id: 'experiment-session' } } }, signal: behavior.cancel?.signal ?? new AbortController().signal }
   return { ctx, calls, records, exec }
 }
+
+test('official prose runtime keeps original content without a trusted classifier', async t => {
+  const { ctx, calls, records, exec } = await setup(t, { noClassifier: true })
+  const baseline = await ctx.tools.execute(exec)
+  await ctx.plugin(Experiments, options())
+  assert.deepEqual(await ctx.tools.execute(exec), baseline)
+  assert.equal(calls.length, 0)
+  assert.equal(records.at(-1).reason, 'content-not-prose')
+})
+
+test('official runtime rejects entirely protected prose before auxiliary inference', async t => {
+  const { ctx, calls, records, exec } = await setup(t)
+  const baseline = await ctx.tools.execute(exec)
+  await ctx.plugin(Experiments, options({ protectedTerms: ['Paragraph'] }))
+  assert.deepEqual(await ctx.tools.execute(exec), baseline)
+  assert.equal(calls.length, 0)
+  assert.equal(records.at(-1).reason, 'no-selection-room')
+})
 
 test('official runtime supports explicit off/observe/apply and persists the auxiliary prompt-response manifest', async t => {
   const { ctx, calls, records, exec } = await setup(t)

@@ -4,6 +4,7 @@ import { prepareDiagnosticEvidence, validateDiagnosticSelection } from './diagno
 
 const budgetFields = ['maxInputBytes', 'maxPromptBytes', 'maxOutputBytes', 'maxOutputTokens', 'timeoutMs', 'maxParagraphs']
 const hash = text => createHash('sha256').update(text, 'utf8').digest('hex')
+const renderParagraphs = spans => spans.map(span => `[Source paragraph ${span.id}; UTF-16 ${span.start}:${span.end}]\n${span.text}`).join('\n\n')
 
 function paragraphs(text) {
   const spans = []
@@ -100,6 +101,16 @@ export function createTextSelector(options) {
       if (!spans.length || spans.length > config.maxParagraphs) return decline('paragraph-budget')
     }
     const required = spans.filter(span => prepared?.requiredIds.includes(span.id) || protectedTerms.some(term => span.text.includes(term))).map(span => span.id)
+    if (spans.length === 1 || required.length === spans.length) return decline('no-selection-room')
+    // Every legal selection is nonempty and contains all required spans. This
+    // escaped-text byte bound excludes receipts and other caller framing, so
+    // callers may safely reject impossible savings before storage or inference.
+    const escapedBytes = text => Buffer.byteLength(JSON.stringify(text)) - 2
+    const minimumSelectionBytes = diagnostic
+      ? escapedBytes(validateDiagnosticSelection(text, prepared, required).text)
+      : required.length
+        ? escapedBytes(renderParagraphs(spans.filter(span => required.includes(span.id))))
+        : spans.reduce((minimum, span) => Math.min(minimum, escapedBytes(renderParagraphs([span]))), Infinity)
     const sourceHash = prepared?.sourceHash ?? hash(text)
     const cacheKey = hash(`${configurationKey}\n${sourceHash}\n${queryHash ?? ''}`)
     // IDs and exact text are sufficient for selection. Keep offsets, line
@@ -135,7 +146,7 @@ export function createTextSelector(options) {
       }
     }
     if (requestBytes > config.maxPromptBytes) return decline('prompt-byte-budget')
-    const token = Object.freeze({ status: 'prepared', requestBytes, minimumManifestBytes: Buffer.byteLength(JSON.stringify({ audit: { request: { provider, model, maxTokens: config.maxOutputTokens, messages } } })) })
+    const token = Object.freeze({ status: 'prepared', requestBytes, minimumSelectionBytes, minimumManifestBytes: Buffer.byteLength(JSON.stringify({ audit: { request: { provider, model, maxTokens: config.maxOutputTokens, messages } } })) })
     preparations.set(token, { text, queryHash, diagnostic, prepared, spans, required, sourceHash, cacheKey, prompt, messages })
     return token
   }
@@ -249,7 +260,7 @@ export function createTextSelector(options) {
       const result = Object.freeze({ status: 'selected', strategy, sourceHash, queryHash, audit,
         ...(validated?.coverage ? { coverage: validated.coverage } : {}),
         selectedIds: Object.freeze(selected.map(span => span.id)), spans: selected,
-        text: validated?.text ?? selected.map(span => `[Source paragraph ${span.id}; UTF-16 ${span.start}:${span.end}]\n${span.text}`).join('\n\n'), originUsage: usage, callUsage: usage, usageComplete: usage !== undefined,
+        text: validated?.text ?? renderParagraphs(selected), originUsage: usage, callUsage: usage, usageComplete: usage !== undefined,
         cacheHit: false, llmCalled: true })
       if (cacheable) {
         const entries = cache ?? new Map()

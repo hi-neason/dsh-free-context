@@ -256,6 +256,15 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
         ...(readText ? { readText: { enabled: true, ...(encodeArtifacts ? { encodeArtifacts: true } : {}) } } : {}) })
     if (group === 'plugin' && experimentalConfig) {
       ctx.provide('freeContextQuery', { getQuery: () => fixture.phases?.[phaseIndex]?.query ?? fixture.query })
+      // Only the explicitly declared prose fixture and its exact presented
+      // bytes are classified. Reads, spills and transformed outputs stay unknown.
+      const proseFixture = ['task-independent', 'query-dependent'].includes(fixture.experiment)
+      const fixtureHash = createHash('sha256').update(fixtureContent, 'utf8').digest('hex')
+      ctx.provide('freeContextContentClassifier', { classify: request => ({ ...request,
+        kind: proseFixture && request.toolName === 'fixture' && request.readPath === undefined &&
+          request.sessionId === agent?.session.header.id && request.sha256 === fixtureHash ? 'prose' : 'unknown',
+        complete: true,
+      }) })
       await ctx.plugin(experimentsPlugin, experimentalConfig)
     }
     if (composeWithTunedNative) await ctx.plugin(SpillPolicy, { maxInlineTokens })

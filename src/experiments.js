@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto'
 import { getSnapshotTracking } from './snapshot-telemetry.js'
 import { parseExperimentConfig } from './experiment-config.js'
 export { Config } from './experiment-config.js'
 import { createTextSelector } from './text-selection.js'
 import { createPostExecuteHandler } from './pipeline.js'
-import { measureContent, reportDecision } from './diagnostics.js'
+import { estimateTokens, measureContent, reportDecision } from './diagnostics.js'
 import { archiveOriginal, formatSnapshotReference } from './snapshot.js'
 import { createTrialBudgets } from './trial-budget.js'
 import { assessNetBenefit } from './economics.js'
@@ -28,6 +29,27 @@ function readQuery(provider, exec) {
   return value
 }
 
+/** The host classifies the exact observed text, not the current file contents.
+ * Synchronous, side-effect-free classification permits a final post-observer
+ * recheck. A tool allowlist alone cannot classify mixed read/bash output.
+ */
+function proseGuard(ctx, exec, text, readPath) {
+  const classifier = ctx.get('freeContextContentClassifier')
+  const session = exec.agent?.session
+  const request = Object.freeze({ toolName: exec.name, callId: exec.callId, sessionId: session?.header?.id,
+    readPath, sha256: createHash('sha256').update(text, 'utf8').digest('hex') })
+  return () => {
+    try {
+      if (!classifier || typeof classifier.classify !== 'function' || ctx.get('freeContextContentClassifier') !== classifier ||
+          exec.agent?.session !== session || session?.header?.id !== request.sessionId || exec.name !== request.toolName || exec.callId !== request.callId ||
+          ![request.toolName, request.callId, request.sessionId].every(value => typeof value === 'string' && value.length > 0)) return false
+      const result = classifier.classify(request)
+      if (result && typeof result.then === 'function') { Promise.resolve(result).catch(() => {}); return false }
+      return result?.kind === 'prose' && result.complete === true && Object.keys(request).every(key => result[key] === request[key])
+    } catch { return false }
+  }
+}
+
 /** Optional auxiliary model experiment. No Agent request or historical message mutation. */
 export function apply(ctx, input) {
   const config = parseExperimentConfig(input)
@@ -37,7 +59,7 @@ export function apply(ctx, input) {
   const trialBudgets = createTrialBudgets(config)
   const select = createTextSelector({ ...config, llm: ctx.llm })
   const warn = message => ctx.logger.warn(message)
-  const transform = async (content, exec) => {
+  const transform = async (content, exec, { readPath } = {}) => {
     let reason = 'unsupported-content'
     let selection
     let estimatedCost
@@ -54,6 +76,8 @@ export function apply(ctx, input) {
         trialBudget = trialBudgets(exec.agent?.session)
         if (!trialBudget) { reason = 'trial-session-required'; return undefined }
       }
+      const classificationIsCurrent = config.selectionMode === 'diagnostic-evidence' ? () => true : proseGuard(ctx, exec, content[0].text, readPath)
+      if (!classificationIsCurrent()) { reason = 'content-not-prose'; return undefined }
       const pricing = config.pricing
       if (!pricing?.currency || ['uncachedInputPerMillion', 'cacheReadPerMillion', 'outputPerMillion'].some(key => pricing[key] === undefined)) { reason = 'missing-pricing'; return undefined }
       if (!trial && ['minimumFutureRequests', 'expectedRecoveryCost', 'safetyMargin', 'maxCallCost', 'futureCacheReadPerMillion'].some(key => config[key] === undefined)) { reason = 'missing-economic-assumptions'; return undefined }
@@ -74,6 +98,10 @@ export function apply(ctx, input) {
       }
       const prepared = select.prepare({ kind: config.selectionMode === 'diagnostic-evidence' ? 'diagnostic' : 'prose', text: content[0].text, signal: exec.signal, query })
       if (prepared.status !== 'prepared') { reason = prepared.reason; return undefined }
+      const minimumBytes = measureContent([{ ...content[0], text: '' }]).bytes + prepared.minimumSelectionBytes
+      const minimumTokens = estimateTokens(minimumBytes)
+      if (minimumBytes >= original.bytes || minimumTokens >= original.estimatedTokens ||
+          original.estimatedTokens - minimumTokens < config.minSavingsTokens) { reason = 'insufficient-size-savings'; return undefined }
       if (prepared.minimumManifestBytes > config.maxArtifactBytes) { reason = 'manifest-byte-budget'; return undefined }
       // Heuristic conservative admission: treat each actual serialized prompt byte as one
       // input token, price every token at the highest declared input rate.
@@ -81,12 +109,14 @@ export function apply(ctx, input) {
       const cachedSelection = select.cached(prepared, { session: exec.agent?.session, signal: exec.signal })
       callCostUpperEstimate = cachedSelection ? 0 : (prepared.requestBytes * Math.max(pricing.uncachedInputPerMillion, pricing.cacheReadPerMillion, pricing.cacheWritePerMillion ?? pricing.uncachedInputPerMillion) + config.maxOutputTokens * pricing.outputPerMillion) / 1e6
       if (!Number.isFinite(callCostUpperEstimate) || callCostUpperEstimate > config.maxCallCost) { reason = 'call-cost-budget'; return undefined }
-      if (!trial && !economics(0, callCostUpperEstimate).adopt) { reason = 'no-predicted-benefit-before-call'; return undefined }
+      if (!trial && !economics(minimumTokens, callCostUpperEstimate).adopt) { reason = 'no-predicted-benefit-before-call'; return undefined }
       const queryIsCurrent = () => !queryProvider || (ctx.get('freeContextQuery') === queryProvider && readQuery(queryProvider, exec) === query)
       const store = ctx.get('spillStore')
       reason = 'snapshot-failed'
       const originalReceipt = await archiveOriginal(store, exec, content[0].text, { maxBytes: config.maxInputBytes })
       const originalReference = tracking.record(exec, originalReceipt, 'original')
+      if (!classificationIsCurrent()) { reason = 'content-classification-changed'; return undefined }
+      if (!queryIsCurrent()) { reason = 'query-changed'; return undefined }
       reason = 'selection-failed'
       let reservation
       if (trial && !cachedSelection) {
@@ -99,6 +129,7 @@ export function apply(ctx, input) {
       } finally {
         reservation?.settle(selection, estimatedCost)
       }
+      if (!classificationIsCurrent()) { reason = 'content-classification-changed'; return undefined }
       if (!queryIsCurrent()) { reason = 'query-changed'; return undefined }
       if (selection.status !== 'selected') { reason = selection.reason; return undefined }
       if (!selection.usageComplete || estimatedCost === undefined || callCost(selection.originUsage, pricing) === undefined) { reason = 'missing-priced-usage'; return undefined }
@@ -125,7 +156,7 @@ export function apply(ctx, input) {
       if (output.bytes >= original.bytes || output.estimatedTokens >= original.estimatedTokens || original.estimatedTokens - output.estimatedTokens < config.minSavingsTokens) { reason = 'insufficient-size-savings'; return undefined }
       if (!trial && !economics(output.estimatedTokens, estimatedCost).adopt) { reason = 'insufficient-net-benefit'; return undefined }
       reason = config.mode === 'apply' ? 'selected' : 'observed'
-      return { content: replacement, strategy: selection.strategy, lossy: true, validate: () => diagnosticsComplete && queryIsCurrent(), snapshots: [originalReference, auditReference].filter(Boolean) }
+      return { content: replacement, strategy: selection.strategy, lossy: true, validate: () => diagnosticsComplete && classificationIsCurrent() && queryIsCurrent(), snapshots: [originalReference, auditReference].filter(Boolean) }
     } catch {
       if (exec.signal?.aborted) reason = 'aborted'
       return undefined
