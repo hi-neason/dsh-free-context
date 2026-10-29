@@ -4,6 +4,7 @@ import { measureContent } from './diagnostics.js'
 import { decodeJsonRows, encodeJsonRows } from './json-codec.js'
 import { reduceNodeTap, reduceNodeSpec } from './log-reducer.js'
 import { encodeLosslessText } from './lossless-text.js'
+import { encodeSearchResults } from './search-codec.js'
 import { waitForBoundary } from './async-boundary.js'
 import { archiveOriginal, formatSnapshotReference } from './snapshot.js'
 
@@ -71,20 +72,28 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
         return { content: replacement, strategy: 'json-rows-v1', lossy: false }
       }
     }
-    if (exec.name !== 'read' && config.text.enabled) {
+    if (exec.name !== 'read' && (config.text.enabled || config.search.enabled)) {
       // Structured JSON stays on the verified JSON route or remains original.
       // Exact generic-text decoding alone does not establish field-use quality.
       try { JSON.parse(block.text); return undefined } catch { /* Non-JSON text may use the generic codec. */ }
-      const encoded = encodeLosslessText(block.text, { maxInputBytes: config.maxInputBytes, maxOutputBytes: config.maxInputBytes })
-      if (encoded !== undefined) {
+      const candidates = []
+      const addCandidate = (encoded, strategy, ratio) => {
+        if (encoded === undefined) return
         const replacement = [{ ...block, text: encoded }]
         const output = measureContent(replacement, estimator)
-        // The complete frame is self-contained. Require a substantial saving
-        // before replacing readable text; do not create a recovery snapshot.
-        if (smaller(replacement) && output.bytes * 2 <= input.bytes &&
-            output.estimatedTokens * 2 <= input.estimatedTokens) {
-          return { content: replacement, strategy: 'tool-lossless-text-v1', lossy: false }
+        if (smaller(replacement, output) && output.bytes * ratio <= input.bytes &&
+            output.estimatedTokens * ratio <= input.estimatedTokens) {
+          candidates.push({ content: replacement, strategy, output })
         }
+      }
+      const budgets = { maxInputBytes: config.maxInputBytes, maxOutputBytes: config.maxInputBytes }
+      if (config.search.enabled) addCandidate(encodeSearchResults(block.text, budgets), 'search-paths-v1', 1)
+      // General text still requires at least 50% reduction of its full frame.
+      if (config.text.enabled) addCandidate(encodeLosslessText(block.text, budgets), 'tool-lossless-text-v1', 2)
+      candidates.sort((a, b) => a.output.estimatedTokens - b.output.estimatedTokens || a.output.bytes - b.output.bytes)
+      if (candidates.length) {
+        const { content, strategy } = candidates[0]
+        return { content, strategy, lossy: false }
       }
     }
     if (!config.logs.enabled) return undefined

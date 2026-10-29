@@ -25,7 +25,7 @@ export function apply(ctx, input) {
     installRetirement(ctx, config.retirement, { readTracking, mode: config.mode, onSnapshot: snapshotTracking?.record,
       onDecision: record => ctx.parallel('free-context/retirement', record) })
   }
-  if (config.tools.length === 0 || (!config.json.enabled && !config.logs.enabled && !config.text.enabled && !config.readText.enabled)) return
+  if (config.tools.length === 0 || (!config.json.enabled && !config.logs.enabled && !config.text.enabled && !config.search.enabled && !config.readText.enabled)) return
   ctx.on('tools/post-execute', createPostExecuteHandler(
     createContentRouter(config, { estimator, getStore: () => ctx.get('spillStore'), onSnapshot: snapshotTracking?.record,
       getReadClassifier: () => ctx.get('freeContextReadClassifier') }),

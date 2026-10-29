@@ -1,6 +1,6 @@
 import { resolveRetirementConfig } from './retirement.js'
 
-const keys = ['mode', 'tools', 'minInputBytes', 'maxInputBytes', 'minSavingsTokens', 'json', 'logs', 'text', 'readText', 'retirement']
+const keys = ['mode', 'tools', 'minInputBytes', 'maxInputBytes', 'minSavingsTokens', 'json', 'logs', 'text', 'search', 'readText', 'retirement']
 
 function object(value, allowed, path) {
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
@@ -59,7 +59,7 @@ export function parseConfig(input = {}) {
     mode, tools: Object.freeze([...tools]), minInputBytes, maxInputBytes,
     minSavingsTokens: integer(input, 'minSavingsTokens', 32),
     json: strategy(input, 'json', true), logs: strategy(input, 'logs', false),
-    text: strategy(input, 'text', false), readText: readTextStrategy(input),
+    text: strategy(input, 'text', false), search: strategy(input, 'search', false), readText: readTextStrategy(input),
     retirement: resolveRetirementConfig(Object.hasOwn(input, 'retirement') ? input.retirement : {}),
   })
 }

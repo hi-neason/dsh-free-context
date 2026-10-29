@@ -6,7 +6,7 @@ import { apply } from '../src/index.js'
 test('defaults are conservative and nested configuration is copied and frozen', () => {
   assert.deepEqual(parseConfig(), {
     mode: 'observe', tools: [], minInputBytes: 1024, maxInputBytes: 1048576,
-    minSavingsTokens: 32, json: { enabled: true }, logs: { enabled: false }, text: { enabled: false }, readText: { enabled: false, encodeArtifacts: false },
+    minSavingsTokens: 32, json: { enabled: true }, logs: { enabled: false }, text: { enabled: false }, search: { enabled: false }, readText: { enabled: false, encodeArtifacts: false },
     retirement: { enabled: false, tools: [], minInputBytes: 8192, minSavingsTokens: 32,
       retainRecentResults: 4, minAgeSteps: 3, minModelUses: 2, minStepsBetweenRetirements: 1,
       phasePolicy: 'any', excerptCharacters: 256, maxEntriesPerStep: 1, maxSnapshotBytes: 1048576 },

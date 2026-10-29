@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { decodeLosslessText } from '../src/lossless-text.js'
+import { decodeSearchResults } from '../src/search-codec.js'
 import { formatSnapshotReference } from '../src/snapshot.js'
 import { verifySnapshot } from '../src/recovery.js'
 import { decodeJsonRows } from '../src/json-codec.js'
@@ -133,7 +134,23 @@ export function collectReadAdoptions(events, modelCalls, decisions, toolCalls) {
   })
 }
 
-export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs, experimentalConfig, adapterFactory, maxSteps = criteria.maxSteps, configureContext, composeWithTunedNative = false, validationFeedbackLimit = 0, readText = false, encodeArtifacts = false, encodeToolText = false } = {}) {
+/** Exact search attribution requires selection, a valid persisted frame, and model visibility. */
+export function collectSearchAdoptions(events, modelCalls, decisions, originalText) {
+  return events.filter(event => event.type === 'tool/result').flatMap(event => {
+    const message = event.data?.message
+    if (!message || message.isError || message.content?.length !== 1 || message.content[0]?.type !== 'text') return []
+    const selected = decisions.filter(row => row.callId === message.toolCallId && row.strategy === 'search-paths-v1' && row.outcome === 'selected')
+    if (selected.length !== 1) return []
+    try { if (typeof originalText !== 'string' || decodeSearchResults(message.content[0].text) !== originalText) return [] } catch { return [] }
+    const hash = contentHash(message.content)
+    const visible = modelCalls.flatMap(call => call.visibleToolResults ?? []).find(row => row.callId === message.toolCallId && row.contentHash === hash)
+    return [{ callId: message.toolCallId, strategy: 'search-paths-v1', persisted: true, modelVisible: Boolean(visible),
+      persistedContentHash: hash, modelVisibleContentHash: visible?.contentHash ?? null }]
+  })
+}
+
+export async function runAgentFixture(fixture, group, { key, model = 'deepseek-flash', replay = false, prices, historyRetirement, timeoutMs = criteria.timeoutMs, experimentalConfig, adapterFactory, maxSteps = criteria.maxSteps, configureContext, composeWithTunedNative = false, validationFeedbackLimit = 0, readText = false, encodeArtifacts = false, encodeToolText = false, encodeSearchResults = false } = {}) {
+  if (typeof encodeSearchResults !== 'boolean') throw new TypeError('encodeSearchResults must be a boolean')
   if (typeof encodeToolText !== 'boolean') throw new TypeError('encodeToolText must be a boolean')
   if (typeof readText !== 'boolean') throw new TypeError('readText must be a boolean')
   if (typeof encodeArtifacts !== 'boolean' || encodeArtifacts && !readText) throw new TypeError('encodeArtifacts requires boolean readText enabled')
@@ -250,9 +267,11 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
     if (group === 'plugin') await ctx.plugin(plugin, historyRetirement
       ? { mode: 'apply', tools: readText ? ['read'] : [], retirement: historyRetirement,
         ...(encodeToolText ? { text: { enabled: true } } : {}),
+        ...(encodeSearchResults ? { search: { enabled: true } } : {}),
         ...(readText ? { readText: { enabled: true, ...(encodeArtifacts ? { encodeArtifacts: true } : {}) } } : {}) }
       : { mode: 'apply', tools: [fixture.ptc ? 'run_code' : 'fixture', ...(readText ? ['read'] : [])], minInputBytes: 0, logs: { enabled: true },
         ...(encodeToolText ? { text: { enabled: true } } : {}),
+        ...(encodeSearchResults ? { search: { enabled: true } } : {}),
         ...(readText ? { readText: { enabled: true, ...(encodeArtifacts ? { encodeArtifacts: true } : {}) } } : {}) })
     if (group === 'plugin' && experimentalConfig) {
       ctx.provide('freeContextQuery', { getQuery: () => fixture.phases?.[phaseIndex]?.query ?? fixture.query })
@@ -374,6 +393,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       drafts, feedback, correctionCount: feedback.length, responseContractSatisfied, responseSchemaSatisfied, attempts: attempts.length, usageComplete, modelCalls, phaseResults, experiments, snapshotRecoveryByPhase,
       adoptions: collectAdoptions(events, modelCalls),
       readAdoptions: collectReadAdoptions(events, modelCalls, decisions, toolCalls),
+      ...(encodeSearchResults ? { searchAdoptions: collectSearchAdoptions(events, modelCalls, decisions, fixtureContent) } : {}),
       recoveryCalls: toolCalls.filter(call => call.readSnapshot).length,
       usageKind: replay ? 'synthetic-replay' : 'provider-reported', usage,
       estimatedCostUSD: replay || !usageComplete ? null : priceUsage(usage, prices), pricing: prices ?? null,
@@ -381,7 +401,7 @@ export async function runAgentFixture(fixture, group, { key, model = 'deepseek-f
       ...(historyRetirement ? { historyRetirement, retirements: retirements.map(record => ({ ...record,
         ...(record.reason === 'retired' ? { actualPostRetirementSteps: steps - record.beforeStep + 1 } : {}) })) } : {}),
       decisions: decisions.map(({ strategy, outcome, reason, input, output }) => ({ strategy, outcome, reason, input, output })),
-      configuration: { ...(encodeToolText ? { encodeToolText: group === 'plugin' } : {}), maxInlineTokens, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: composeWithTunedNative, validationFeedbackLimit, maxSteps, timeoutMs,
+      configuration: { ...(encodeSearchResults ? { encodeSearchResults: group === 'plugin' } : {}), ...(encodeToolText ? { encodeToolText: group === 'plugin' } : {}), maxInlineTokens, plugin: group === 'plugin', nativePolicyInstalledAfterPlugin: composeWithTunedNative, validationFeedbackLimit, maxSteps, timeoutMs,
         ...(readText ? { readText: { enabled: group === 'plugin', classifier: 'filesystem-host-v1', minimumSavingsRatio: 0.5, ...(encodeArtifacts ? { encodeArtifacts: group === 'plugin' } : {}) } } : {}) },
       ...(readClassification ? { readClassification } : {}),
       turnEnds: events.filter(event => event.type === 'turn/end').map(event => ({ kind: event.data.reason.kind, code: event.data.reason.error?.code })),
