@@ -69,7 +69,7 @@ for (const [count, cap] of [[30, 2500], [250, 3000]]) test(`official spill ${cap
   assert.match(visible, /supported grammar only, not semantic completeness/)
   assert.match(visible, /NOT final inline coverage/)
   assert.match(visible, /recover the full spilled tool output/)
-  assert.match(visible, /recover the original for missing evidence, completeness checks/)
+  assert.match(visible, /Recover omitted\/exact evidence or check completeness/)
   // The preview retains compact receipts; verify the complete persisted audit
   // instead of treating pre-retention coverage as final inline coverage.
   const receipts = visible.split('\n').filter(line => line.startsWith('Original tool-result snapshot: '))
