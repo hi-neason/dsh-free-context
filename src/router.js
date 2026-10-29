@@ -16,8 +16,7 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
     const input = measureContent(content, estimator)
     if (!isEligibleInput(config, exec.name, input.bytes)) return undefined
     const block = content[0]
-    const smaller = replacement => {
-      const output = measureContent(replacement, estimator)
+    const smaller = (replacement, output = measureContent(replacement, estimator)) => {
       return output.bytes < input.bytes && output.estimatedTokens < input.estimatedTokens &&
         input.estimatedTokens - output.estimatedTokens >= config.minSavingsTokens
     }
@@ -32,12 +31,17 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
         if (exec.signal?.aborted || (classified?.kind !== 'source' && !artifact) || classified.complete !== true ||
             classified.inputPath !== readPath || typeof classified.canonicalPath !== 'string') return undefined
         const encoded = encodeLosslessText(block.text, { maxInputBytes: config.maxInputBytes, maxOutputBytes: config.maxInputBytes })
-        if (encoded === undefined || !smaller([{ ...block, text: encoded }])) return undefined
+        if (encoded === undefined) return undefined
+        const encodedContent = [{ ...block, text: encoded }]
+        const encodedOutput = measureContent(encodedContent, estimator)
+        // Recovery framing can only add bytes. Reject impossible 50% savings
+        // before writing an original that would never be adopted.
+        if (encodedOutput.bytes * 2 > input.bytes || !smaller(encodedContent, encodedOutput)) return undefined
         if (artifact) {
           // Encode this complete rendered text in memory. Never archive an
           // artifact read or append a new receipt that creates a snapshot chain.
-          const replacement = [{ ...block, text: encoded }]
-          const output = measureContent(replacement, estimator)
+          const replacement = encodedContent
+          const output = encodedOutput
           if (exec.signal?.aborted || output.bytes * 2 > input.bytes ||
               output.estimatedTokens * 2 > input.estimatedTokens) return undefined
           return { content: replacement, strategy: 'read-artifact-lossless-text-v1', lossy: false }

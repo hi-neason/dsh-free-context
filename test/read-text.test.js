@@ -157,3 +157,13 @@ test('artifact opt-in leaves source archival and snapshot registration intact', 
   assert.equal(registrations[0][2], 'original')
   assert.match(candidate.content[0].text, /Original tool-result snapshot:/)
 })
+
+test('source reads below the required byte saving never write a doomed snapshot', async () => {
+  const source = 'Repeated status. '.repeat(200) + Array.from({ length: 200 },
+    (_, i) => `Unique detail number ${i} has value ${i * 7919}.`).join('\n')
+  const blocks = [{ type: 'text', text: source }]
+  const saves = []
+  const route = createContentRouter(config(), { getReadClassifier: () => classifier, getStore: () => receiptStore(saves) })
+  assert.equal(await route(blocks, exec(), { readPath: '/work/a.log' }), undefined)
+  assert.equal(saves.length, 0)
+})
