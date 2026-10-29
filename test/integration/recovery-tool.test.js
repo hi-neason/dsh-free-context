@@ -17,18 +17,23 @@ const { Session, buildForkSeed } = await load('@deepseek-ai/dsh-session')
 const { default: SpillLocal } = await load('@deepseek-ai/dsh-spill-local')
 const { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } = await load('@deepseek-ai/dsh-agent-loop-testkit')
 
-async function fixture(t) {
+async function fixture(t, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'free-context-recall-'))
   const ctx = new Context()
   t.after(async () => { await ctx.fiber.dispose(); await rm(directory, { recursive: true, force: true }) })
   await mountAgentLoopTestDependencies(ctx, { workingDirectory: true })
   await ctx.plugin(SpillLocal, { root: join(directory, 'spill'), cleanupPeriodDays: 0 })
   const tracking = installSnapshotTracking(ctx)
-  const recovery = installSnapshotRecovery(ctx, { tracking, pageCharacters: 512,
-    readPage: async (locator, { offset, length, signal }) =>
-      ctx.fs.readByteRange(await ctx.fs.resolve(locator, { signal }), { offset, length }, signal),
+  const reads = { calls: 0, bytes: 0 }
+  const recovery = installSnapshotRecovery(ctx, { tracking, pageCharacters: 512, ...options,
+    readPage: async (locator, { offset, length, signal }) => {
+      const bytes = await ctx.fs.readByteRange(await ctx.fs.resolve(locator, { signal }), { offset, length }, signal)
+      reads.calls++
+      reads.bytes += bytes.byteLength
+      return bytes
+    },
   })
-  return { ctx, directory, tracking, recovery }
+  return { ctx, directory, tracking, recovery, reads }
 }
 
 class RecallAdapter extends LlmAdapter {
@@ -141,4 +146,77 @@ test('main plugin snapshots share an explicitly provided registry with model rec
   assert.ok(result.data.message.content[0].text.includes(adapter.referenceId))
   const last = events.filter(event => event.type === 'assistant/message').at(-1).data.message.content[0].text
   assert.equal(JSON.parse(last).recovered, original)
+})
+
+test('official AgentLoop receives multiple exact ranges from one verified tool call and reports final recovery', async t => {
+  const { ctx, directory, tracking, reads } = await fixture(t)
+  const recoveries = []
+  ctx.on('free-context/recovery', record => recoveries.push(record))
+  class BatchAdapter extends LlmAdapter {
+    calls = 0
+    async resolveModel(provider, model) { return { provider, id: model, name: model } }
+    async *stream(request) {
+      if (++this.calls > 2) throw new Error('batch recovery needs only one tool call')
+      const tool = request.messages.findLast(message => message.role === 'tool')
+      const block = tool ? { type: 'text', text: JSON.stringify({ recovered: JSON.parse(tool.content[0].text).pages.map(page => page.text) }) } :
+        { type: 'tool-call', id: 'batch-recall', name: 'free_context_recall',
+          arguments: request.messages.find(message => message.role === 'user').content[0].text }
+      yield { type: 'block-end', index: 0, block }
+      yield { type: 'finish', reason: { kind: tool ? 'stop' : 'tool-calls' } }
+    }
+  }
+  const adapter = new BatchAdapter()
+  ctx.llm.registerAdapter(['batch-recovery'], adapter)
+  const harness = await mountAgentLoopTestHarness(ctx)
+  const agent = await harness.create('batch-recall', { provider: 'batch-recovery', model: 'scripted' }, { cwd: directory })
+  const original = '\ufeff中文😀\r\n' + 'a😀中'.repeat(900) + '\r\n最后'
+  const receipt = await archiveOriginal(ctx.spillStore, { agent, name: 'fixture', callId: 'original' }, original)
+  const { referenceId } = tracking.record({ agent }, receipt)
+  const ranges = [{ offset: 0, limit: 6 }, { offset: 1000, limit: 10 }]
+  agent.followup(createUserMessage({ content: [{ type: 'text', text: JSON.stringify({ referenceId, ranges }) }], source: { kind: 'user' } }))
+  await agent.whenIdle()
+  const events = agent.session.snapshotEvents()
+  const final = events.filter(event => event.type === 'assistant/message').at(-1).data.message.content[0].text
+  const characters = Array.from(original)
+  assert.deepEqual(JSON.parse(final).recovered, ranges.map(({ offset, limit }) => characters.slice(offset, offset + limit).join('')))
+  assert.equal(events.filter(event => event.type === 'tool/result').length, 1)
+  assert.equal(adapter.calls, 2)
+  assert.equal(reads.calls, 2)
+  assert.equal(reads.bytes, receipt.bytes)
+  assert.equal(recoveries.length, 1)
+  assert.equal(recoveries[0].outcome, 'success')
+  assert.equal(recoveries[0].reportedSnapshotVerified, true)
+  assert.equal(recoveries[0].verifiedFull, false)
+  assert.deepEqual(recoveries[0].characterRanges, [{ offset: 0, endOffset: 6 }, { offset: 1000, endOffset: 1010 }])
+  assert.equal(recoveries[0].returnedCharacters, 16)
+  for (const secret of [directory, original, 'locator', 'retrievalHint']) assert.equal(JSON.stringify(recoveries).includes(secret), false)
+})
+
+test('four-page batches recover 64 KiB with eight tool calls instead of thirty-two without changing bytes', async t => {
+  const { ctx, tracking, reads } = await fixture(t, { pageCharacters: 2048 })
+  const agent = { session: Session.create('batch-budget') }
+  const original = 'a'.repeat(65536)
+  const receipt = await archiveOriginal(ctx.spillStore, { agent, name: 'fixture', callId: 'original' }, original)
+  const { referenceId } = tracking.record({ agent }, receipt)
+  const recover = async batch => {
+    let calls = 0
+    let recovered = ''
+    for (let offset = 0; offset < original.length; offset += batch ? 8192 : 2048) {
+      const args = batch ? { referenceId, ranges: Array.from({ length: 4 }, (_, index) => ({ offset: offset + index * 2048, limit: 2048 })) } :
+        { referenceId, offset }
+      const result = await ctx.tools.execute({ name: 'free_context_recall', callId: `${batch}-${calls++}`, arguments: args, agent, signal: new AbortController().signal })
+      assert.equal(result.isError, false)
+      const value = JSON.parse(result.content[0].text)
+      assert.equal(value.snapshotVerified, true)
+      recovered += batch ? value.pages.map(page => page.text).join('') : value.text
+    }
+    assert.equal(recovered, original)
+    return calls
+  }
+  assert.equal(await recover(false), 32)
+  assert.deepEqual(reads, { calls: 160, bytes: 2097152 })
+  reads.calls = 0
+  reads.bytes = 0
+  assert.equal(await recover(true), 8)
+  assert.deepEqual(reads, { calls: 40, bytes: 524288 })
 })

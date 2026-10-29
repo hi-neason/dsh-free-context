@@ -46,7 +46,8 @@ test('tool pages preserve exact codepoints and distinguish snapshot verification
 test('unknown owners, forks, fabricated locators and invalid ranges fail before I/O', async () => {
   const { tool, exec, referenceId, state } = setup()
   for (const args of [{ referenceId: 'f'.repeat(64) }, { referenceId, locator: 'opaque:forged' },
-    { referenceId, offset: -1 }, { referenceId, limit: 4 }, { referenceId, limit: 0 }, { referenceId, offset: 1.5 }]) {
+    { referenceId, offset: -1 }, { referenceId, limit: 4 }, { referenceId, limit: 0 }, { referenceId, offset: 1.5 },
+    { referenceId, offset: null }, { referenceId, limit: null }]) {
     await assert.rejects(tool.execute(args, exec))
   }
   await assert.rejects(tool.execute({ referenceId }, { ...exec, agent: { session: { header: { id: 'owner' } } } }))
@@ -96,4 +97,69 @@ test('empty snapshot is complete and out-of-range offsets do not return misleadi
   assert.equal(page.nextOffset, null)
   assert.equal(page.text, '')
   await assert.rejects(empty.tool.execute({ referenceId: empty.referenceId, offset: 1 }, empty.exec), /offset/)
+})
+
+test('multiple Unicode ranges share one full verification and preserve requested order', async () => {
+  const item = setup('\ufeff中😀\r\nlast', { pageCharacters: 3, maxBatchCharacters: 8 })
+  const { tool, exec, referenceId, state } = item
+  const result = await tool.execute({ referenceId, ranges: [{ offset: 2, limit: 3 }, { offset: 0, limit: 2 }, { offset: 8, limit: 3 }] }, exec)
+  assert.equal(state.reads, 2, 'one snapshot read plus the EOF probe, regardless of range count')
+  assert.equal(result.referenceId, referenceId)
+  assert.equal(result.snapshotVerified, true)
+  assert.equal(result.totalCharacters, 9)
+  assert.deepEqual(result.pages, [
+    { offset: 2, nextOffset: 5, pageComplete: false, text: '😀\r\n' },
+    { offset: 0, nextOffset: 2, pageComplete: false, text: '\ufeff中' },
+    { offset: 8, nextOffset: null, pageComplete: false, text: 't' },
+  ])
+  assert.equal(Object.hasOwn(result, 'text'), false)
+})
+
+test('batch boundaries and malformed requests reject before storage I/O', async () => {
+  const { tool, exec, referenceId, state } = setup('original text', { pageCharacters: 4, maxBatchCharacters: 6 })
+  const invalid = [
+    { ranges: [] }, { ranges: null }, { ranges: {} }, { ranges: Array(2) },
+    { ranges: Array.from({ length: 17 }, () => ({ offset: 0, limit: 1 })) },
+    { ranges: [{ offset: 0, limit: 5 }] },
+    { ranges: [{ offset: 0, limit: 4 }, { offset: 0, limit: 3 }] },
+    { ranges: [{ offset: 0 }] }, { ranges: [{ limit: 1 }] },
+    { ranges: [{ offset: -1, limit: 1 }] }, { ranges: [{ offset: 0.5, limit: 1 }] },
+    { ranges: [{ offset: 0, limit: 0 }] }, { ranges: [{ offset: 0, limit: 1, extra: true }] },
+    { ranges: [null] }, { ranges: [[0, 1]] },
+    { ranges: [{ offset: 0, limit: 1 }], offset: 0 },
+    { ranges: [{ offset: 0, limit: 1 }], limit: 1 },
+    { ranges: [{ offset: 0, limit: 1 }], extra: true },
+  ]
+  for (const args of invalid) await assert.rejects(tool.execute({ referenceId, ...args }, exec))
+  assert.equal(state.reads, 0)
+  for (const maxBatchCharacters of [0, -1, 1.5, 16385, NaN]) assert.throws(() => setup('x', { maxBatchCharacters }), /maxBatchCharacters/)
+})
+
+test('batch recovery never returns partial success after corruption, expiry, cancellation or ownership changes', async () => {
+  for (const failure of ['corrupt', 'expired', 'cancelled', 'ownership', 'out-of-range']) {
+    const item = setup('original text', { pageCharacters: 4 })
+    let ranges = [{ offset: 0, limit: 3 }, { offset: 4, limit: 3 }]
+    if (failure === 'corrupt') item.state.bytes[item.state.bytes.length - 1] ^= 1
+    if (failure === 'expired') item.state.bytes = Buffer.alloc(0)
+    if (failure === 'cancelled') item.exec.signal = AbortSignal.abort()
+    if (failure === 'ownership') item.exec.agent.session = { header: { id: 'owner' } }
+    if (failure === 'out-of-range') ranges = [{ offset: 0, limit: 3 }, { offset: 50, limit: 3 }]
+    await assert.rejects(item.tool.execute({ referenceId: item.referenceId, ranges }, item.exec), failure)
+  }
+  let invalidate
+  const item = setup('original text', { pageCharacters: 4, readPage: async (_, { offset, length }) => {
+    invalidate()
+    return Buffer.from('original text').subarray(offset, offset + length)
+  } })
+  invalidate = () => { item.exec.agent.session.header.id = 'changed' }
+  await assert.rejects(item.tool.execute({ referenceId: item.referenceId, ranges: [{ offset: 0, limit: 3 }, { offset: 4, limit: 3 }] }, item.exec), /ownership/)
+})
+
+test('batch recovery keeps per-call integrity verification for mutable backends', async () => {
+  const { tool, exec, referenceId, state } = setup('original text', { pageCharacters: 4 })
+  const args = { referenceId, ranges: [{ offset: 0, limit: 3 }, { offset: 4, limit: 3 }] }
+  await tool.execute(args, exec)
+  state.bytes[state.bytes.length - 1] ^= 1
+  await assert.rejects(tool.execute(args, exec), /hash/)
+  assert.equal(state.reads, 4)
 })

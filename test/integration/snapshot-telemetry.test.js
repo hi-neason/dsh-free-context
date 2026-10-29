@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { installSnapshotTracking } from '../../src/snapshot-telemetry.js'
+import { installSnapshotRecovery } from '../../src/recovery-tool.js'
 import { archiveOriginal } from '../../src/snapshot.js'
 
 const requireRuntime = createRequire(resolve(process.env.DSH_RUNTIME_ROOT ?? '.omx/integration-runtime', 'package.json'))
@@ -136,3 +137,60 @@ test('definition-owned finalization is observed after post policies and receives
   assert.equal(events[0].verifiedFull, false)
   assert.equal(events[0].startLine, undefined)
 })
+
+for (const registration of ['before', 'after']) {
+  test(`recall final telemetry respects policies registered ${registration} tracking and failed verified reads`, async t => {
+    const { ctx, session, tracking, call } = await fixture(t)
+    if (registration === 'before') tracking.dispose()
+    let policy = 'accept'
+    ctx.on('tools/post-execute', async (exec, result, next) => {
+      const decision = await next()
+      if (exec.name !== 'free_context_recall') return decision
+      if (policy === 'modify') return { kind: 'accept', content: [{ type: 'text', text: 'replacement' }] }
+      if (policy === 'block') return { kind: 'block', feedback: [{ type: 'text', text: 'blocked' }] }
+      return decision
+    }, { prepend: true })
+    const active = registration === 'before' ? installSnapshotTracking(ctx) : tracking
+    const controller = new AbortController()
+    let cancelRead = false
+    installSnapshotRecovery(ctx, { tracking: active, readPage: async (locator, { offset, length, signal }) => {
+      if (cancelRead) controller.abort()
+      return ctx.fs.readByteRange(await ctx.fs.resolve(locator, { signal }), { offset, length }, signal)
+    } })
+    const exec = { name: 'fixture', callId: 'original', agent: { session } }
+    const receipt = await archiveOriginal(ctx.spillStore, exec, 'original\r\n😀 evidence')
+    const { referenceId } = active.record(exec, receipt)
+    const events = []
+    ctx.on('free-context/recovery', record => events.push(record))
+    const args = { referenceId, ranges: [{ offset: 0, limit: 3 }, { offset: 8, limit: 3 }] }
+    for (const action of ['accept', 'modify', 'block']) {
+      policy = action
+      const result = await call('free_context_recall', action, args)
+      assert.equal(result.isError, action === 'block')
+      // An outer blocker is only observable as final failure; do not infer its
+      // private decision from the failure text when tracking did not receive it.
+      const expected = action === 'accept' ? 'success' : action === 'modify' ? 'modified' : registration === 'before' ? 'blocked' : 'failed'
+      assert.equal(events.at(-1).outcome, expected)
+      assert.equal(events.at(-1).recoveryTool, 'free_context_recall')
+      assert.equal(events.at(-1).reportedSnapshotVerified, action === 'accept' ? true : undefined)
+      assert.equal(events.at(-1).characterRanges?.length, action === 'accept' ? 2 : undefined)
+    }
+    policy = 'accept'
+    cancelRead = true
+    const cancelled = await ctx.tools.execute({ name: 'free_context_recall', callId: 'cancelled', arguments: args,
+      agent: { session }, signal: controller.signal })
+    assert.equal(cancelled.isError, true)
+    assert.equal(events.at(-1).outcome, 'cancelled')
+    assert.equal(events.at(-1).characterRanges, undefined)
+    cancelRead = false
+    await writeFile(receipt.locator, 'modified\r\n😀 evidence')
+    assert.equal((await call('free_context_recall', 'corrupt', args)).isError, true)
+    assert.equal(events.at(-1).outcome, 'failed')
+    assert.equal(events.at(-1).reportedSnapshotVerified, undefined)
+    await rm(receipt.locator)
+    assert.equal((await call('free_context_recall', 'missing', args)).isError, true)
+    assert.equal(events.at(-1).outcome, 'failed')
+    assert.equal(events.length, 6)
+    for (const secret of ['original\\r\\n', 'evidence', 'locator', 'retrievalHint']) assert.equal(JSON.stringify(events).includes(secret), false)
+  })
+}
