@@ -4,6 +4,7 @@ import { parseConfig } from '../src/config.js'
 import { measureContent } from '../src/diagnostics.js'
 import { decodeJsonRows } from '../src/json-codec.js'
 import { createContentRouter } from '../src/router.js'
+import { apply } from '../src/index.js'
 
 const rows = Array.from({ length: 50 }, (_, i) => ({ long_identifier_field: i, long_description_field: `value-${i}`, long_status_field: 'ok' }))
 const content = [{ type: 'text', text: JSON.stringify(rows), customMetadata: 'kept' }]
@@ -112,4 +113,40 @@ test('explicit input budgets above one MiB also bound the verification decoder o
   const candidate = createContentRouter(config({ maxInputBytes: budget }))(blocks, exec)
   assert.equal(candidate.strategy, 'json-rows-v1')
   assert.deepEqual(JSON.parse(decodeJsonRows(candidate.content[0].text, { maxOutputBytes: budget })), largeRows)
+})
+
+test('host content estimator rejects byte-smaller JSON that expands target token count', async () => {
+  let handler
+  const records = []
+  const seen = []
+  const service = { estimate(serialized) {
+    const text = JSON.parse(serialized)[0].text
+    seen.push(text)
+    return text === content[0].text ? 100 : 200
+  } }
+  apply({
+    get: name => name === 'freeContextTokenEstimator' ? service : undefined,
+    on: (_name, listener) => { handler = listener },
+    parallel: (_name, record) => records.push(record), logger: { warn() {} },
+  }, config())
+  const decision = { kind: 'accept' }
+  const result = { content, value: rows, isError: false }
+  assert.equal(await handler({ ...exec, signal: new AbortController().signal }, result, async () => decision), decision)
+  assert.ok(seen.includes(content[0].text))
+  assert.ok(seen.some(text => text !== content[0].text))
+  assert.equal(records[0].input.estimatedTokens, 100)
+  assert.equal(records[0].estimateKind, 'host-serialized-content-estimator')
+})
+
+test('invalid host estimator fails before hooks; estimator errors preserve the original result', async () => {
+  assert.throws(() => apply({ get: () => ({}), on: () => assert.fail('invalid estimator registered a hook') }, config()), /estimator/i)
+  for (const estimate of [() => NaN, () => { throw new Error('private provider error') }, () => Promise.reject(new Error('async unsupported'))]) {
+    let handler
+    const warnings = []
+    apply({ get: () => ({ estimate }), on: (_name, listener) => { handler = listener }, parallel() {},
+      logger: { warn: text => warnings.push(text) } }, config())
+    const decision = { kind: 'accept' }
+    assert.equal(await handler(exec, { content, value: rows }, async () => decision), decision)
+    assert.ok(warnings.every(text => !text.includes('private provider error')))
+  }
 })

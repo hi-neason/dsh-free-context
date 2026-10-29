@@ -13,6 +13,12 @@ export const inject = ['tools']
 export function apply(ctx, input) {
   const config = parseConfig(input)
   if (config.mode === 'off') return
+  const tokenEstimator = ctx.get?.('freeContextTokenEstimator')
+  if (tokenEstimator !== undefined && typeof tokenEstimator?.estimate !== 'function') throw new TypeError('Invalid freeContextTokenEstimator estimator')
+  // Bind once so original and candidate are always priced by the same adapter.
+  // Hosts reload the plugin when changing model/tokenizer contracts.
+  const estimate = tokenEstimator?.estimate.bind(tokenEstimator)
+  const estimator = estimate ? (_bytes, serialized) => estimate(serialized) : undefined
   const snapshotTracking = config.retirement.enabled || (config.tools.length && (config.logs.enabled || config.readText.enabled)) ? getSnapshotTracking(ctx) : undefined
   if (config.retirement.enabled) {
     const readTracking = config.retirement.tools.includes('read') ? installReadTracking(ctx) : undefined
@@ -21,11 +27,12 @@ export function apply(ctx, input) {
   }
   if (config.tools.length === 0 || (!config.json.enabled && !config.logs.enabled && !config.text.enabled && !config.readText.enabled)) return
   ctx.on('tools/post-execute', createPostExecuteHandler(
-    createContentRouter(config, { getStore: () => ctx.get('spillStore'), onSnapshot: snapshotTracking?.record,
+    createContentRouter(config, { estimator, getStore: () => ctx.get('spillStore'), onSnapshot: snapshotTracking?.record,
       getReadClassifier: () => ctx.get('freeContextReadClassifier') }),
     message => ctx.logger.warn(message),
     {
       mode: config.mode,
+      estimator,
       eligible: (exec, bytes) => isEligibleInput(config, exec.name, bytes),
       report: record => ctx.parallel('free-context/decision', record),
     },

@@ -7,8 +7,12 @@ export function estimateTokens(bytes) {
 
 /** Metrics describe JSON-serialized content, including block framing; media tokens are unknown. */
 export function measureContent(content, estimator = estimateTokens) {
-  const bytes = Buffer.byteLength(JSON.stringify(content), 'utf8')
-  const tokens = estimator(bytes)
+  const serialized = JSON.stringify(content)
+  const bytes = Buffer.byteLength(serialized, 'utf8')
+  // The second argument enables a model-specific tokenizer without changing
+  // existing byte-only estimators. Pass text, never mutable content objects.
+  const tokens = estimator(bytes, serialized)
+  if (tokens && typeof tokens.then === 'function') Promise.resolve(tokens).catch(() => {})
   if (!Number.isSafeInteger(tokens) || tokens < 0) throw new TypeError('Invalid token estimate')
   return Object.freeze({ bytes, estimatedTokens: tokens })
 }

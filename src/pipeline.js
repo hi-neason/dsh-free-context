@@ -24,7 +24,7 @@ export function createPostExecuteHandler(transform, warn = () => {}, options = {
         ...(strategy ? { strategy, lossy: lossy === true } : {}),
         ...(snapshots?.length ? { snapshots } : {}),
         ...(input ? { input } : {}), ...(output ? { output } : {}),
-        estimateKind: 'serialized-content-utf8-heuristic', elapsedMs: performance.now() - started,
+        estimateKind: estimator ? 'host-serialized-content-estimator' : 'serialized-content-utf8-heuristic', elapsedMs: performance.now() - started,
       }, { signal: exec.signal, timeoutMs: diagnosticsTimeoutMs })
       if (!completed || exec.signal?.aborted) return decision
       if (validate) {

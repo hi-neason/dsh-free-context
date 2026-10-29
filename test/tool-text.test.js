@@ -51,7 +51,7 @@ test('JSON keeps precedence and read cannot enter the generic text route', async
 test('text-only plugin registers a policy; observe, errors, PTC internals and value replacement retain originals', async () => {
   for (const mode of ['observe', 'apply']) {
     const listeners = [], reports = []
-    apply({ on: (...args) => listeners.push(args), get: () => assert.fail('no services needed'),
+    apply({ on: (...args) => listeners.push(args), get: name => { assert.equal(name, 'freeContextTokenEstimator'); return undefined },
       logger: { warn: assert.fail }, parallel: async (_, record) => reports.push(record) },
     { mode, tools: ['fixture'], json: { enabled: false }, text: { enabled: true } })
     assert.equal(listeners.length, 1)

@@ -86,6 +86,18 @@ test('no strategy and ineligible records retain input metrics; estimators reject
   assert.throws(() => measureContent(content, () => NaN), /Invalid token estimate/)
 })
 
+test('content estimators receive exact serialized input while byte-only callbacks stay compatible', () => {
+  const serialized = JSON.stringify(content)
+  let captured
+  const measured = measureContent(content, (bytes, text) => {
+    captured = { bytes, text }
+    return 7
+  })
+  assert.deepEqual(captured, { bytes: Buffer.byteLength(serialized), text: serialized })
+  assert.deepEqual(measured, { bytes: Buffer.byteLength(serialized), estimatedTokens: 7 })
+  assert.equal(measureContent(content, bytes => bytes).estimatedTokens, Buffer.byteLength(serialized))
+})
+
 
 test('abort during an observer preserves the prior decision and reports selection, never commitment', async () => {
   const controller = new AbortController()
