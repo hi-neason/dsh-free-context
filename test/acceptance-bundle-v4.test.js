@@ -641,3 +641,21 @@ test('root independently prices development raw usage with pinned stage rates an
   changedPlan.plan.inputs.developmentPricing.output++
   assert.equal(summarizeAcceptanceBundleV4(changedPlan).planValid, false)
 })
+
+test('fully priced truncated development calls cannot pass the independent quality gate', () => {
+  const report = bundle()
+  const row = report.developmentReport.records[0]
+  const events = row.ledgerText.split('\n').map(JSON.parse)
+  events.find(event => event.type === 'model/end').finish = 'max-tokens'
+  row.ledgerText = events.map(JSON.stringify).join('\n')
+  Object.assign(row.result, reconcileDevelopmentLedger(events, { replay: false, pricing: report.plan.developmentPlan.pricing,
+    model: report.plan.developmentPlan.model, manifestHash: row.taskPlan.manifestHash }))
+  // Even a forged successful result cannot override the persisted failed turn.
+  row.result.passed = true
+  row.sessionEvents.find(event => event.type === 'turn/end').data.reason.kind = 'max-tokens'
+  const checked = summarizeAcceptanceBundleV4(attested(report))
+  assert.equal(checked.accountingComplete, true)
+  assert.ok(checked.totalCostUSD > 0)
+  assert.equal(checked.developmentComplete, false)
+  assert.equal(checked.accepted, false)
+})

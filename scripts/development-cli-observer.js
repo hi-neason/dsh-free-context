@@ -32,15 +32,17 @@ export async function apply(ctx) {
     const call = { id: ++calls, agentStep: steps, kind: request.tools?.length ? 'agent' : 'auxiliary', provider: request.provider, model: request.model,
       visibleToolResults: (request.messages ?? []).filter(message => message.role === 'tool').map(message => ({ callId: message.toolCallId, contentHash: hash(message.content) })) }
     record({ type: 'model/start', ...call })
-    let usage = null, finish = null
+    let usage = null, finish = null, streamEnded = false
     try {
       for await (const chunk of next()) {
         if (chunk.type === 'usage') usage = { ...chunk.usage }
         if (chunk.type === 'finish') finish = chunk.reason.kind
         yield chunk
       }
+      streamEnded = true
     } finally {
-      const complete = validUsage(usage) && ['stop', 'tool-calls'].includes(finish)
+      // Terminal truncation can be fully billed; persisted turn state still gates task quality.
+      const complete = streamEnded && validUsage(usage) && ['stop', 'tool-calls', 'max-tokens'].includes(finish)
       const cost = complete && !config.replay ? priceUsage(usage, config.pricing) : null
       incomplete ||= !complete || !config.replay && cost === null
       if (cost !== null) knownCost += cost

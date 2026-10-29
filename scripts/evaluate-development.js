@@ -41,7 +41,7 @@ export function reconcileDevelopmentLedger(events, { replay, pricing, model, man
     // Keep usable counters even if metadata is damaged. The derived visibility
     // view contains safe entries; the original journal remains the raw evidence.
     return { ...start, visibleToolResults: Array.isArray(start.visibleToolResults) ? start.visibleToolResults.filter(visibleResult) : [], usage: end?.usage ?? null, finish: end?.finish ?? null,
-      complete: start.id === index + 1 && Number.isSafeInteger(start.agentStep) && start.agentStep >= 0 && visibilityComplete && matches.length === 1 && end?.complete === true && validUsage(end?.usage) && ['stop', 'tool-calls'].includes(end?.finish) }
+      complete: start.id === index + 1 && Number.isSafeInteger(start.agentStep) && start.agentStep >= 0 && visibilityComplete && matches.length === 1 && end?.complete === true && validUsage(end?.usage) && ['stop', 'tool-calls', 'max-tokens'].includes(end?.finish) }
   })
   const usage = summarizeUsage(modelCalls.map(call => call.usage))
   const route = call => call.provider === (replay ? 'development-replay' : 'deepseek-official') && call.model === model

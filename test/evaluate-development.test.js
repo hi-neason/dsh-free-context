@@ -100,3 +100,65 @@ test('artifact read packing cannot start without explicit boolean read packing',
     await assert.rejects(runDevelopmentTask('json-output-limit', 'plugin', { directory: '/tmp/not-created-artifact-read', ...settings }), TypeError)
   }
 })
+
+test('explicit complete max-tokens terminal is billed without reviving historical incomplete records', () => {
+  const terminal = { ...end, finish: 'max-tokens' }
+  const billed = reconcileDevelopmentLedger([start, terminal], binding)
+  assert.equal(billed.usageComplete, true)
+  assert.equal(billed.costComplete, true)
+  assert.equal(billed.estimatedCostUSD, .00002)
+  assert.equal(billed.modelCalls.length, 1)
+  for (const altered of [{ complete: false }, { usage: null }, { usage: { ...end.usage, outputTokens: -1 } }, { finish: 'error' }, { finish: null }]) {
+    const rejected = reconcileDevelopmentLedger([start, { ...terminal, ...altered }], binding)
+    assert.equal(rejected.usageComplete, false)
+    assert.equal(rejected.costComplete, false)
+    assert.equal(rejected.estimatedCostUSD, null)
+    if (!Object.hasOwn(altered, 'usage')) assert.equal(rejected.knownPricedUsageUSD, .00002)
+  }
+  for (const events of [[start, terminal, terminal], [start, start, terminal], [{ ...start, model: 'foreign' }, terminal],
+    [start, { ...terminal, manifestHash: 'foreign' }], [{ ...start, id: 2 }, { ...terminal, id: 2 }]]) {
+    assert.equal(reconcileDevelopmentLedger(events, binding).costComplete, false)
+  }
+})
+
+test('observer prices complete truncation, enforces budget, and rejects failed or unmetered streams', async () => {
+  const { mkdtemp, readFile, rm, writeFile } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const root = await mkdtemp(join(tmpdir(), 'development-observer-metering-'))
+  const priorConfig = process.env.DSH_DEVELOPMENT_CONFIG
+  const priorExit = new Set(process.listeners('exit'))
+  try {
+    for (const scenario of ['complete', 'transport-after-finish', 'missing-usage', 'invalid-usage', 'error']) {
+      const ledger = join(root, `${scenario}.jsonl`), config = join(root, `${scenario}.json`)
+      await writeFile(ledger, '')
+      await writeFile(config, JSON.stringify({ ledger, workspace: root, replay: false, pricing, manifestHash: 'bound', maxSteps: 12, maxCalls: 16, maxCostUSD: .00001 }))
+      process.env.DSH_DEVELOPMENT_CONFIG = config
+      const observer = await import(`../scripts/development-cli-observer.js?scenario=${scenario}`)
+      const handlers = new Map()
+      await observer.apply({ on(name, handler) { handlers.set(name, handler) }, provide() {} })
+      const request = { provider: 'deepseek-official', model: 'model', tools: [{}], messages: [] }
+      const run = () => handlers.get('llm/stream')(request, () => (async function* () {
+        if (scenario !== 'missing-usage') yield { type: 'usage', usage: scenario === 'invalid-usage' ? { ...end.usage, outputTokens: -1 } : end.usage }
+        yield { type: 'finish', reason: { kind: scenario === 'error' ? 'error' : 'max-tokens' } }
+        if (scenario === 'transport-after-finish') throw new Error('synthetic transport failure')
+      })())
+      let failure
+      try { for await (const chunk of run()) assert.ok(chunk.type) } catch (error) { failure = error }
+      assert.equal(Boolean(failure), scenario === 'transport-after-finish')
+      const events = parseDevelopmentLedger(await readFile(ledger, 'utf8')).events
+      assert.equal(events.at(-1).complete, scenario === 'complete')
+      const observed = reconcileDevelopmentLedger(events, binding)
+      assert.equal(observed.costComplete, scenario === 'complete')
+      if (scenario === 'complete') assert.equal(observed.estimatedCostUSD, .00002)
+      await assert.rejects(async () => { for await (const chunk of run()) assert.fail(`unexpected ${chunk.type}`) }, /budget unavailable/)
+      const finalEvents = parseDevelopmentLedger(await readFile(ledger, 'utf8')).events
+      assert.equal(finalEvents.at(-1).reason, scenario === 'complete' ? 'model-budget' : 'incomplete-cost-accounting')
+    }
+  } finally {
+    if (priorConfig === undefined) delete process.env.DSH_DEVELOPMENT_CONFIG
+    else process.env.DSH_DEVELOPMENT_CONFIG = priorConfig
+    for (const listener of process.listeners('exit')) if (!priorExit.has(listener)) process.removeListener('exit', listener)
+    await rm(root, { recursive: true, force: true })
+  }
+})
