@@ -72,3 +72,21 @@ test('text-only plugin registers a policy; observe, errors, PTC internals and va
     ]) assert.equal(await handler(execution, result, async () => downstream), downstream)
   }
 })
+
+test('an unprofitable JSON candidate can fall through to exact text compression', () => {
+  for (const [rows, minSavingsTokens] of [
+    [[{ a: 'A repeated diagnostic explanation. '.repeat(400) }], 0],
+    [Array.from({ length: 100 }, () => ({ a: 'A repeated diagnostic explanation. '.repeat(20) })), 1000],
+  ]) {
+    const originalText = JSON.stringify(rows, null, 2)
+    const blocks = [{ type: 'text', text: originalText, customMetadata: 'preserved' }]
+    assert.equal(createContentRouter(config({ text: { enabled: false }, minSavingsTokens }))(blocks, exec()), undefined)
+    const candidate = createContentRouter(config({ minSavingsTokens }))(blocks, exec())
+    assert.equal(candidate?.strategy, 'tool-lossless-text-v1')
+    assert.equal(candidate.lossy, false)
+    assert.equal(candidate.content[0].customMetadata, 'preserved')
+    assert.equal(decodeLosslessText(candidate.content[0].text), originalText)
+    assert.ok(measureContent(candidate.content).bytes * 2 <= measureContent(blocks).bytes)
+    assert.ok(measureContent(blocks).estimatedTokens - measureContent(candidate.content).estimatedTokens >= minSavingsTokens)
+  }
+})

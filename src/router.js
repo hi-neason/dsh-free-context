@@ -57,9 +57,8 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
     if (config.json.enabled) {
       const encoded = encodeJsonRows(block.text, { maxInputBytes: config.maxInputBytes })
       // Codec only accepts object arrays, so its object envelope cannot be encoded twice.
-      if (encoded !== undefined) {
+      if (encoded !== undefined && smaller([{ ...block, text: encoded }])) {
         const replacement = [{ ...block, text: encoded }]
-        if (!smaller(replacement)) return undefined
         const restored = decodeJsonRows(encoded, {
           maxInputBytes: config.maxInputBytes, maxOutputBytes: config.maxInputBytes,
         })

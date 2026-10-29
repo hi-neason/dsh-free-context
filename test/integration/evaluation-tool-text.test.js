@@ -6,9 +6,12 @@ import { decodeLosslessText } from '../../src/lossless-text.js'
 const text = 'Repeated operational explanation. '.repeat(500) + '\nMAGIC alpha=>17; omega=>29\n'
 const fixture = { id: 'tool-text-visible', kind: 'acceptance', text, query: 'Call fixture and return MAGIC as JSON.', expected: { alpha: 17, omega: 29 } }
 
-test('official AgentLoop persists complete tool text encoding and sends it through tuned native spill', async () => {
+for (const [label, sourceText] of [['plain text', text], ['JSON with an unprofitable rows encoding', JSON.stringify([{ a: text }])]]) {
+test(`official AgentLoop persists ${label} encoding and sends it through tuned native spill`, async () => {
+  const text = sourceText
+  const task = { ...fixture, text }
   const observed = []
-  const result = await runAgentFixture(fixture, 'plugin', { replay: true, encodeToolText: true, composeWithTunedNative: true,
+  const result = await runAgentFixture(task, 'plugin', { replay: true, encodeToolText: true, composeWithTunedNative: true,
     adapterFactory: ({ LlmAdapter }) => new class extends LlmAdapter {
       async resolveModel(provider, model) { return { provider, id: model, name: model } }
       async *stream(request) {
@@ -35,6 +38,7 @@ test('official AgentLoop persists complete tool text encoding and sends it throu
   assert.equal(result.recoveryCalls, 0)
   assert.equal(result.steps, 2)
 })
+}
 
 test('tool text evaluation flag requires an explicit boolean', async () => {
   await assert.rejects(runAgentFixture(fixture, 'plugin', { replay: true, encodeToolText: 'true' }), /encodeToolText/)
