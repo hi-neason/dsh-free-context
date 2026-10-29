@@ -31,7 +31,7 @@ const configuration = group => ({ maxInlineTokens: group === 'baseline-default' 
 
 /** Pure prospective plan. Filesystem existence, realpath and write-once creation
  * are executor responsibilities; this checks lexical containment only. */
-export function createAcceptanceBundlePlanV4({ rootDir, bundleId, seed = 20261026, replay = true, provenance, pricing = null,
+export function createAcceptanceBundlePlanV4({ rootDir, bundleId, seed = 20261026, replay = true, provenance, pricing = null, developmentPricing,
   maxTotalCostUSD, maxTotalCalls, maxTaskCostUSD, knownPriorSpendUSD, priorUnpricedCalls, runtimes, developmentIdentity } = {}) {
   if (!isAbsolute(rootDir ?? '') || resolve(rootDir) !== rootDir || rootDir === repository || rootDir.startsWith(repository + sep) ||
       typeof bundleId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}$/.test(bundleId) || typeof replay !== 'boolean') throw new TypeError('Explicit external root, bundle identity and boolean replay required')
@@ -40,11 +40,12 @@ export function createAcceptanceBundlePlanV4({ rootDir, bundleId, seed = 2026102
   if (maxTaskCostUSD !== undefined && (!Number.isFinite(maxTaskCostUSD) || maxTaskCostUSD <= 0 || maxTaskCostUSD > agentBudget.maxCostUSD)) throw new TypeError('Task cost limit may only tighten the original ceiling')
   if (!validProvenance(provenance, pricing ?? { model: provenance?.model }) || typeof provenance?.model !== 'string' || !provenance.model.trim()) throw new TypeError('Complete provenance required')
   if (pricing !== null && !validEvaluationPricing(pricing) || !replay && pricing === null) throw new TypeError('Complete pricing required')
+  if (developmentPricing !== undefined && (typeof developmentPricing?.model !== 'string' || !developmentPricing.model.trim() || !validEvaluationPricing(developmentPricing))) throw new TypeError('Complete development pricing required')
   if (!runtimes || !same(Object.keys(runtimes).sort(), ['agent', 'cli']) || Object.values(runtimes).some(runtime => !runtime || !same(Object.keys(runtime).sort(), ['lockHash', 'root', 'version']) ||
       !isAbsolute(runtime.root ?? '') || resolve(runtime.root) !== runtime.root || !digest.test(runtime.lockHash ?? '') || runtime.version !== '0.2.1-rc.2')) throw new TypeError('Both pinned rc.2 runtime identities required')
   if (provenance.runtimeLockHash !== runtimes.agent.lockHash) throw new TypeError('Agent provenance lock must match pinned runtime')
   if (!developmentIdentity || !same(Object.keys(developmentIdentity).sort(), ['fixtureInitialSourceHash', 'fixtureManifestHash', 'fixtureValidationHash']) || !Object.values(developmentIdentity).every(value => digest.test(value))) throw new TypeError('Historical development fixture identities required')
-  const inputs = copy({ rootDir, bundleId, seed, replay, provenance, pricing, maxTotalCostUSD, maxTotalCalls, knownPriorSpendUSD, priorUnpricedCalls, runtimes, developmentIdentity, ...(maxTaskCostUSD === undefined ? {} : { maxTaskCostUSD }) })
+  const inputs = copy({ rootDir, bundleId, seed, replay, provenance, pricing, maxTotalCostUSD, maxTotalCalls, knownPriorSpendUSD, priorUnpricedCalls, runtimes, developmentIdentity, ...(developmentPricing === undefined ? {} : { developmentPricing }), ...(maxTaskCostUSD === undefined ? {} : { maxTaskCostUSD }) })
   const taskAgentBudget = maxTaskCostUSD === undefined ? agentBudget : { ...agentBudget, maxCostUSD: maxTaskCostUSD }
   const taskDevelopmentBudget = maxTaskCostUSD === undefined ? developmentBudget : { ...developmentBudget, maxCostUSD: maxTaskCostUSD }
   const { answer, ...fixture } = retirementDiscoveryFixtureV4()
@@ -54,7 +55,7 @@ export function createAcceptanceBundlePlanV4({ rootDir, bundleId, seed = 2026102
   calibration.runs = [...calibration.trainingRunIds, calibration.heldoutRunId].map((runId, index) => ({ runId, role: index === 3 ? 'heldout' : 'training', groups: groups.map((_, position) => groups[(position + index) % 3]) }))
   const benchmarkPlan = createAcceptancePlanV4({ seed })
   const developmentPlan = createDevelopmentStudyPlan({ directory: join(rootDir, 'development'), runtimeRoot: runtimes.cli.root,
-    sourceTreeHash: provenance.sourceTreeHash, runtimeLockHash: runtimes.cli.lockHash, ...developmentIdentity, replay, pricing, readText: true, encodeArtifacts: true,
+    sourceTreeHash: provenance.sourceTreeHash, runtimeLockHash: runtimes.cli.lockHash, ...developmentIdentity, replay, pricing: developmentPricing === undefined ? pricing : developmentPricing, readText: true, encodeArtifacts: true,
     maxTotalCostUSD, maxTotalCalls: Math.min(maxTotalCalls, 216), ...taskDevelopmentBudget, maxTaskCostUSD: taskDevelopmentBudget.maxCostUSD })
   const slots = [
     ...calibration.runs.flatMap(run => run.groups.map(group => ({ slotId: `cal/${run.runId}/${group}`, kind: 'calibration', runId: run.runId, group, budget: taskAgentBudget, conditional: false }))),
@@ -166,9 +167,10 @@ export function summarizeAcceptanceBundleV4(report) {
     let accounting
     if (slot?.kind === 'development') {
       const ledger = parseDevelopmentLedger(typeof row.ledgerText === 'string' ? row.ledgerText : '')
-      const a = reconcileDevelopmentLedger(ledger.events, { replay: plan.inputs.replay, pricing: plan.inputs.pricing, model: plan.developmentPlan.model,
+      const a = reconcileDevelopmentLedger(ledger.events, { replay: plan.inputs.replay, pricing: plan.developmentPlan.pricing, model: plan.developmentPlan.model,
         manifestHash: row.taskPlan?.manifestHash, ledgerComplete: typeof row.ledgerText === 'string' && ledger.errors.length === 0 })
-      accounting = { complete: a.usageComplete && (plan.inputs.replay || a.costComplete), calls: a.modelCalls.length, cost: a.estimatedCostUSD, known: a.knownPricedUsageUSD }
+      const configurationMatches = row.taskPlan?.configuration?.model === plan.developmentPlan.model && same(row.taskPlan?.configuration?.pricing, plan.developmentPlan.pricing)
+      accounting = { complete: configurationMatches && a.usageComplete && (plan.inputs.replay || a.costComplete), calls: a.modelCalls.length, cost: a.estimatedCostUSD, known: a.knownPricedUsageUSD }
     } else accounting = agentAccounting(row, plan)
     return { slotId, ...accounting, withinBudget: Boolean(slot && accounting.complete && accounting.calls <= slot.budget.maxCalls &&
       Number.isSafeInteger(slot.kind === 'development' ? row.result?.steps : row.steps) && (slot.kind === 'development' ? row.result.steps : row.steps) >= 1 &&

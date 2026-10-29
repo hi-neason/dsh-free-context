@@ -36,7 +36,7 @@ async function runtimeIdentity(root, kind) {
 
 /** Execute the frozen bundle with real official runtimes. No custom runner or
  * mutable context injection is exposed; callbacks observe durable checkpoints. */
-export async function evaluateAcceptanceBundleV4({ rootDir, bundleId, seed = 20261026, replay = true, pricing = null,
+export async function evaluateAcceptanceBundleV4({ rootDir, bundleId, seed = 20261026, replay = true, pricing = null, developmentPricing,
   maxTotalCostUSD, maxTotalCalls, maxTaskCostUSD, knownPriorSpendUSD, priorUnpricedCalls,
   agentRuntimeRoot = environmentAgentRoot, cliRuntimeRoot = process.env.DSH_CLI_RUNTIME_ROOT ?? '.omx/cli-runtime',
   key, credentialFile, onPlan, onResult } = {}) {
@@ -47,7 +47,7 @@ export async function evaluateAcceptanceBundleV4({ rootDir, bundleId, seed = 202
   if (!replay && ((key !== undefined) === (credentialFile !== undefined) || key !== undefined && (typeof key !== 'string' || !key.trim()) ||
     credentialFile !== undefined && (typeof credentialFile !== 'string' || !credentialFile.trim()))) throw new TypeError('Exactly one explicit live key or credentialFile required')
   const credentialPath = !replay && credentialFile !== undefined ? resolve(credentialFile) : undefined
-  const settings = copy({ bundleId, seed, replay, pricing, maxTotalCostUSD, maxTotalCalls, knownPriorSpendUSD, priorUnpricedCalls, ...(maxTaskCostUSD === undefined ? {} : { maxTaskCostUSD }) })
+  const settings = copy({ bundleId, seed, replay, pricing, maxTotalCostUSD, maxTotalCalls, knownPriorSpendUSD, priorUnpricedCalls, ...(developmentPricing === undefined ? {} : { developmentPricing }), ...(maxTaskCostUSD === undefined ? {} : { maxTaskCostUSD }) })
   const repo = await realpath(repository)
   const root = join(await realpath(dirname(rootDir)), basename(rootDir))
   if (root === repo || root.startsWith(repo + sep)) throw new TypeError('Bundle directory must be outside the repository')
@@ -208,7 +208,7 @@ export async function evaluateAcceptanceBundleV4({ rootDir, bundleId, seed = 202
     } catch (error) { stop(stoppedReason ?? (error instanceof BundleStop ? error.reason : 'benchmark-exception')) }
     try {
       developmentReport = await evaluateDevelopmentStudy({ directory: plan.developmentPlan.directory, runtimeRoot: cliRoot, replay, readText: plan.developmentPlan.readText, encodeArtifacts: plan.developmentPlan.encodeArtifacts,
-        key: replay ? undefined : key, pricing: plan.inputs.pricing, maxTotalCostUSD: plan.inputs.maxTotalCostUSD,
+        key: replay ? undefined : key, pricing: plan.developmentPlan.pricing, maxTotalCostUSD: plan.inputs.maxTotalCostUSD,
         maxTotalCalls: plan.developmentPlan.maxTotalCalls, ...plan.developmentPlan.taskBudget, maxTaskCostUSD: plan.developmentPlan.taskBudget.maxCostUSD,
         async onPlan(child) {
           if (!same(child, plan.developmentPlan)) stop('development-plan-mismatch')

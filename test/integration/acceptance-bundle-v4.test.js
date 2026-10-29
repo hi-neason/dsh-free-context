@@ -359,3 +359,30 @@ test('a tighter task cost ceiling is frozen before credentials or model executio
   assert.equal(report.modelCalls, 0)
   assert.equal((await journal(root)).some(row => row.type === 'slot-plan'), false)
 })
+
+test('explicit development pricing stays pinned through all 138 replay slots', { timeout: 180000 }, async t => {
+  const pricing = { currency: 'USD', model: 'deepseek-flash', sourceUrl: 'https://example.test/pricing', verifiedDate: '2026-10-29', ratePeriod: 'test', uncached: .3, cacheRead: .006, cacheWrite: 0, output: 1.2 }
+  const developmentPricing = { ...pricing, model: 'deepseek-v4-pro', uncached: 1.32, cacheRead: .044, output: 3.96 }
+  let developmentTasks = 0
+  const report = await evaluateAcceptanceBundleV4({ ...options, rootDir: join(await directory(t), 'separate-model'), pricing, developmentPricing,
+    async onPlan(plan) {
+      assert.deepEqual(plan.inputs.pricing, pricing)
+      assert.deepEqual(plan.inputs.developmentPricing, developmentPricing)
+      assert.deepEqual(plan.developmentPlan.pricing, developmentPricing)
+      assert.equal(plan.inputs.provenance.model, pricing.model)
+    },
+    async onResult(row, slot) {
+      if (slot.kind === 'development') {
+        developmentTasks++
+        assert.deepEqual(row.taskPlan.configuration.pricing, developmentPricing)
+        assert.equal(row.taskPlan.configuration.model, 'scripted')
+      } else assert.deepEqual(row.pricing, pricing)
+    },
+  })
+  assert.equal(report.stoppedReason, null)
+  assert.equal(developmentTasks, 9)
+  assert.equal(report.checks.length, 138)
+  assert.equal(report.replayComplete, true)
+  assert.equal(report.accepted, false)
+  assert.equal(report.totalCostUSD, null)
+})

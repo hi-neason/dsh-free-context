@@ -574,3 +574,70 @@ test('coding slots and study reserve 20 steps and 24 calls consistently within u
   assert.equal(plan.criteria.qualityFailuresAllowed, 0)
   assert.equal(plan.criteria.calibrationHeldoutMaximumRemainingRequests, 2)
 })
+
+test('optional development pricing leaves omitted plans unchanged and freezes an isolated override', () => {
+  const original = createAcceptanceBundlePlanV4(inputs)
+  assert.equal(Object.hasOwn(original.inputs, 'developmentPricing'), false)
+  assert.deepEqual(createAcceptanceBundlePlanV4({ ...inputs, developmentPricing: undefined }), original)
+  assert.deepEqual(original.developmentPlan.pricing, pricing)
+  const developmentPricing = { ...pricing, model: 'development-pro', uncached: 1.8, cacheRead: .03, output: 3.6 }
+  const caller = { ...structuredClone(inputs), developmentPricing }
+  const changed = createAcceptanceBundlePlanV4(caller)
+  assert.deepEqual(changed.inputs.developmentPricing, developmentPricing)
+  assert.deepEqual(changed.developmentPlan.pricing, developmentPricing)
+  assert.equal(changed.developmentPlan.model, 'development-pro')
+  for (const field of ['calibration', 'benchmarkPlan', 'slots', 'criteria']) assert.deepEqual(changed[field], original[field])
+  assert.deepEqual(changed.inputs.pricing, original.inputs.pricing)
+  assert.deepEqual(changed.inputs.provenance, original.inputs.provenance)
+  assert.notEqual(changed.manifestHash, original.manifestHash)
+  assert.notEqual(changed.developmentPlan.manifestHash, original.developmentPlan.manifestHash)
+  caller.developmentPricing.output = 99
+  assert.equal(changed.developmentPlan.pricing.output, 3.6)
+  assert.ok(Object.isFrozen(changed.inputs.developmentPricing))
+  assert.ok(Object.isFrozen(changed.developmentPlan.pricing))
+  const rows = recordsFor(changed.developmentPlan)
+  assert.equal(rows.length, 9)
+  assert.deepEqual(new Set(rows.map(row => row.taskPlan.configuration.group)), new Set(['baseline-default', 'baseline-tuned', 'plugin']))
+  assert.ok(rows.every(row => row.taskPlan.configuration.model === 'development-pro'))
+})
+
+test('explicit development pricing requires complete valid rates even during replay', () => {
+  const { cacheWrite, ...missingWrite } = pricing
+  for (const developmentPricing of [null, {}, { ...pricing, model: '' }, { ...pricing, output: -1 },
+    { ...pricing, uncached: NaN }, { ...pricing, cacheRead: Infinity }, missingWrite]) {
+    for (const replay of [false, true]) assert.throws(() => createAcceptanceBundlePlanV4({ ...inputs, replay, developmentPricing }), /development pricing/i)
+  }
+  const developmentPricing = { ...missingWrite, model: 'development-pro', cacheWritePolicy: 'reject-nonzero' }
+  assert.deepEqual(createAcceptanceBundlePlanV4({ ...inputs, developmentPricing }).developmentPlan.pricing, developmentPricing)
+})
+
+test('root independently prices development raw usage with pinned stage rates and rejects model or rate substitution', () => {
+  const developmentPricing = { ...pricing, model: 'development-pro', uncached: 1.8, cacheRead: .03, output: 3.6 }
+  const report = bundle({ budgets: { developmentPricing } })
+  const checked = summarizeAcceptanceBundleV4(report)
+  assert.equal(checked.accepted, true)
+  const devChecks = checked.checks.filter(row => row.slotId.startsWith('development/'))
+  assert.equal(devChecks.length, 9)
+  assert.equal(devChecks[0].cost, (20 * 1.8 + 3.6) / 1e6)
+  const baseline = summarizeAcceptanceBundleV4(bundle())
+  assert.deepEqual(checked.checks.filter(row => !row.slotId.startsWith('development/')), baseline.checks.filter(row => !row.slotId.startsWith('development/')))
+  assert.ok(checked.totalCostUSD > baseline.totalCostUSD)
+  for (const mutate of [
+    row => { const events = row.ledgerText.split('\n').map(JSON.parse); events.find(event => event.type === 'model/start').model = pricing.model; row.ledgerText = events.map(JSON.stringify).join('\n') },
+    row => { row.taskPlan.configuration.pricing = pricing },
+    row => { row.taskPlan.configuration.model = pricing.model },
+  ]) {
+    const wrong = structuredClone(report)
+    mutate(wrong.developmentReport.records[0])
+    const result = summarizeAcceptanceBundleV4(attested(wrong))
+    assert.equal(result.accepted, false)
+    assert.equal(result.accountingComplete, false)
+    assert.equal(result.developmentComplete, false)
+  }
+  const tampered = structuredClone(report)
+  tampered.developmentReport.records[0].result.estimatedCostUSD = 0
+  assert.equal(summarizeAcceptanceBundleV4(attested(tampered)).accepted, false)
+  const changedPlan = structuredClone(report)
+  changedPlan.plan.inputs.developmentPricing.output++
+  assert.equal(summarizeAcceptanceBundleV4(changedPlan).planValid, false)
+})
