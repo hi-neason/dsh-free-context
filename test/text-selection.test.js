@@ -459,6 +459,27 @@ test('normally completed streams release slots without needing iterator return',
   assert.equal(llm.calls.length, 5)
 })
 
+test('captured cache hits refresh recency and avoid another model call for the hot entry', async () => {
+  const llm = runtime()
+  const select = createTextSelector({ ...config(llm), maxCacheEntries: 2 })
+  const session = {}
+  const [a, b, c] = ['A', 'B', 'C'].map(label => select.prepare({ kind: 'prose', text: source + ` ${label}` }))
+  await select.execute(a, { session })
+  await select.execute(b, { session })
+  const captured = select.cached(a, { session })
+  assert.equal(captured.cacheHit, true)
+  assert.equal(captured.llmCalled, false)
+  assert.equal(captured.callUsage, undefined)
+  assert.equal(Object.isFrozen(captured), true)
+  await select.execute(c, { session })
+  const reused = await select.execute(a, { session })
+  assert.equal(llm.calls.length, 3)
+  assert.equal(reused.cacheHit, true)
+  assert.equal(reused.llmCalled, false)
+  assert.deepEqual(reused.spans, captured.spans)
+  assert.equal(select.cached(b, { session }), undefined)
+})
+
 test('captured cache selection remains free after eviction and never admits a fresh paid call', async () => {
   const llm = runtime()
   const select = createTextSelector({ ...config(llm), maxCacheEntries: 1 })

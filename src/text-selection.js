@@ -338,8 +338,12 @@ export function createTextSelector(options) {
     if (signal?.aborted || session === null || typeof session !== 'object') return undefined
     const data = preparations.get(token)
     if (!data) return undefined
-    const cached = sessions.get(session)?.get(data.cacheKey)
-    return cached ? Object.freeze({ ...cached, callUsage: undefined, cacheHit: true, llmCalled: false, elapsedMs: 0 }) : undefined
+    const cache = sessions.get(session)
+    const cached = cache?.get(data.cacheKey)
+    if (!cached) return undefined
+    cache.delete(data.cacheKey)
+    cache.set(data.cacheKey, cached)
+    return Object.freeze({ ...cached, callUsage: undefined, cacheHit: true, llmCalled: false, elapsedMs: 0 })
   }
   select.prepare = prepare
   select.execute = execute
