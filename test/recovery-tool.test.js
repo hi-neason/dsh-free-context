@@ -90,6 +90,23 @@ test('registry identity changes during I/O prevent delivery of an otherwise vali
   await assert.rejects(item.tool.execute({ referenceId: item.referenceId }, item.exec), /ownership/)
 })
 
+test('a host receipt mutated during recovery cannot label old bytes as a different verified snapshot', async () => {
+  for (const field of ['bytes', 'sha256', 'locator']) {
+    const bytes = Buffer.from('original text')
+    const receipt = { bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), locator: 'opaque:original' }
+    let tool
+    installSnapshotRecovery({ tools: { register(definition) { tool = definition } } }, {
+      tracking: { lookup: () => receipt },
+      readPage: async (locator, { offset, length }) => {
+        assert.equal(locator, 'opaque:original')
+        receipt[field] = field === 'bytes' ? 0 : field === 'sha256' ? '0'.repeat(64) : 'opaque:replacement'
+        return bytes.subarray(offset, offset + length)
+      },
+    })
+    await assert.rejects(tool.execute({ referenceId: 'a'.repeat(64) }, { signal: new AbortController().signal }), /identity|ownership/)
+  }
+})
+
 test('empty snapshot is complete and out-of-range offsets do not return misleading empty pages', async () => {
   const empty = setup('')
   const page = await empty.tool.execute({ referenceId: empty.referenceId }, empty.exec)

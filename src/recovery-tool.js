@@ -88,9 +88,15 @@ export function installSnapshotRecovery(ctx, {
       const { batch, ranges } = requestedRanges(args, pageCharacters, maxBatchCharacters)
       const receipt = tracking.lookup(exec, referenceId)
       if (!receipt) throw new Error('Unknown snapshot reference for this session')
-      const bytes = await recoverSnapshot(receipt, readPage, { maxBytes, pageBytes, timeoutMs, maxPendingReads, signal: exec.signal })
+      // Host registries may return mutable objects. Bind verification and the
+      // returned metadata to the same identity across asynchronous backend I/O.
+      const expected = { bytes: receipt.bytes, sha256: receipt.sha256, locator: receipt.locator }
+      const bytes = await recoverSnapshot(expected, readPage, { maxBytes, pageBytes, timeoutMs, maxPendingReads, signal: exec.signal })
       exec.signal?.throwIfAborted()
       if (disposed || tracking.lookup(exec, referenceId) !== receipt) throw new Error('Snapshot reference ownership changed during recovery')
+      if (receipt.bytes !== expected.bytes || receipt.sha256 !== expected.sha256 || receipt.locator !== expected.locator) {
+        throw new Error('Snapshot identity changed during recovery')
+      }
       // Fatal UTF-8 decoding preserves BOM and prevents replacement-character
       // substitution from being presented as exact snapshot text.
       const characters = Array.from(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes))
@@ -101,7 +107,7 @@ export function installSnapshotRecovery(ctx, {
         return { pageComplete: offset === 0 && end === characters.length, offset,
           nextOffset: end < characters.length ? end : null, text: characters.slice(offset, end).join('') }
       })
-      const verified = { referenceId, sha256: receipt.sha256, bytes: receipt.bytes, snapshotVerified: true }
+      const verified = { referenceId, sha256: expected.sha256, bytes: expected.bytes, snapshotVerified: true }
       if (batch) return { ...verified, totalCharacters: characters.length, pages }
       const { pageComplete, offset, nextOffset, text } = pages[0]
       return { ...verified, pageComplete, offset, nextOffset, totalCharacters: characters.length, text }
