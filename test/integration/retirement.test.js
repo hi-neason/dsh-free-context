@@ -8,6 +8,7 @@ import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { retireHistory, installRetirement } from '../../src/retirement.js'
 import { createReadTracker, installReadTracking } from '../../src/read-lifecycle.js'
+import { assessNetBenefit } from '../../src/economics.js'
 import * as Plugin from '../../src/index.js'
 
 const requireRuntime = createRequire(resolve(process.env.DSH_RUNTIME_ROOT ?? '.omx/integration-runtime', 'package.json'))
@@ -115,6 +116,42 @@ test('economic rejection, observe mode and read without known supersession never
       expectedRecoveryCost: options.expectedRecoveryCost ?? 0 }, { ...f, mode: options.mode })
     assert.equal(f.session.seq, revision)
   }
+})
+
+for (const [label, overrides, reason] of [
+  ['zero future requests', { minimumFutureRequests: 0 }, 'no-future-requests'],
+  ['free cached reads', { pricing: { uncachedInputPerMillion: 1, cacheReadPerMillion: 0 } }, 'no-cache-read-savings'],
+  ['declined forecast', { forecast: { scope: 'fixture', observations: [] } }, 'no-future-requests'],
+]) {
+  test(`${label} declines before storage while incomplete protocols still reject`, async t => {
+    const f = fixture(t)
+    const options = { ...config, ...overrides }
+    const before = JSON.stringify(f.session.snapshotEvents())
+    const reports = await retireHistory({ agent: f.agent }, options, f)
+    assert.equal(f.stored.length, 0)
+    assert.equal(JSON.stringify(f.session.snapshotEvents()), before)
+    assert.equal(reports.length, 1)
+    assert.equal(reports[0].reason, 'economic-gate')
+    assert.equal(reports[0].economics.reason, reason)
+
+    f.session.append('compaction/prune', { shadowedRange: { start: f.original.seq, end: f.original.seq },
+      shadowedSeqs: [f.original.seq], shadowedTokenCount: 1 })
+    await assert.rejects(retireHistory({ agent: f.agent }, options, f), error =>
+      error.code === 'RETIREMENT_INCOMPLETE_PROTOCOL' && error.reports[0].reason === 'incomplete-shadow-protocol')
+    assert.equal(f.stored.length, 0)
+  })
+}
+
+test('unprofitable placeholder estimate does not reject a profitable actual candidate', async t => {
+  const f = fixture(t)
+  const options = { ...config, expectedRecoveryCost: 0.001 }
+  assert.equal(assessNetBenefit({ originalTokens: 2, candidateTokens: 1, invalidatedPrefixTokens: 1,
+    compressionCost: 0, minimumFutureRequests: options.minimumFutureRequests, pricing: options.pricing,
+    expectedRecoveryCost: options.expectedRecoveryCost, safetyMargin: options.safetyMargin }).adopt, false)
+  const reports = await retireHistory({ agent: f.agent }, options, f)
+  assert.equal(reports[0].reason, 'retired')
+  assert.equal(reports[0].economics.adopt, true)
+  assert.equal(f.stored.length, 1)
 })
 
 test('failed and recent results remain while a qualified older success is retired', async t => {

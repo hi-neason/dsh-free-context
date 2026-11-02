@@ -192,6 +192,11 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
   const assumptions = assessNetBenefit({ originalTokens: 2, candidateTokens: 1,
     invalidatedPrefixTokens: 1, compressionCost: 0, ...economicInputs })
   if (assumptions.reason === 'missing-input') { report('missing-economic-assumptions'); return reports }
+  // These outcomes are independent of candidate size; reject before archiving.
+  // Other placeholder estimates cannot establish the actual candidate's benefit.
+  if (['no-future-requests', 'no-cache-read-savings'].includes(assumptions.reason)) {
+    report('economic-gate', { economics: assumptions }); return reports
+  }
   if (!events || !services.spillStore) { report('missing-session-or-storage'); return reports }
   let boundary
   let taskProvider
