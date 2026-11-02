@@ -60,6 +60,24 @@ test('encode declines invalid, empty, oversized, nested and unprofitable source 
   assert.equal(encodeLosslessText(encoded.replace('v1]', 'v999]')), undefined)
 })
 
+test('obviously oversized lossless inputs are rejected before Unicode and byte scans', t => {
+  const text = 'x'.repeat(65536)
+  const wellFormed = String.prototype.isWellFormed
+  const byteLength = Buffer.byteLength
+  let scans = 0
+  t.mock.method(String.prototype, 'isWellFormed', function () {
+    if (this.valueOf() === text) scans++
+    return wellFormed.call(this)
+  })
+  t.mock.method(Buffer, 'byteLength', function (value, ...args) {
+    if (value === text) scans++
+    return byteLength.call(this, value, ...args)
+  })
+  assert.equal(encodeLosslessText(text, { maxInputBytes: 32 }), undefined)
+  assert.throws(() => decodeLosslessText(text, { maxInputBytes: 32 }), TypeError)
+  assert.equal(scans, 0)
+})
+
 test('decode enforces exact encoded and expanded UTF-8 budgets, hashes and configuration', () => {
   const encoded = envelope()
   const input = Buffer.byteLength(encoded)

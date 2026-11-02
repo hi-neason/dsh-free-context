@@ -64,6 +64,38 @@ test('short, oversized and already encoded results are declined without extra st
   assert.equal(encodeSearchResults(encoded.replace('v1]', 'v2]')), undefined)
 })
 
+test('ambiguous context stops after the second delimiter without collecting the remaining matches', t => {
+  const text = '/workspace/project/file.js-1-' + 'a-1-'.repeat(10000)
+  const matchAll = String.prototype.matchAll
+  let visited = 0
+  t.mock.method(String.prototype, 'matchAll', function* (pattern) {
+    for (const match of matchAll.call(this, pattern)) {
+      if (this.valueOf() === text) visited++
+      yield match
+    }
+  })
+  assert.equal(encodeSearchResults(text), undefined)
+  assert.equal(visited, 2)
+})
+
+test('obviously oversized search inputs are rejected before Unicode and byte scans', t => {
+  const text = 'x'.repeat(65536)
+  const wellFormed = String.prototype.isWellFormed
+  const byteLength = Buffer.byteLength
+  let scans = 0
+  t.mock.method(String.prototype, 'isWellFormed', function () {
+    if (this.valueOf() === text) scans++
+    return wellFormed.call(this)
+  })
+  t.mock.method(Buffer, 'byteLength', function (value, ...args) {
+    if (value === text) scans++
+    return byteLength.call(this, value, ...args)
+  })
+  assert.equal(encodeSearchResults(text, { maxInputBytes: 32 }), undefined)
+  assert.throws(() => decodeSearchResults(text, { maxInputBytes: 32 }), TypeError)
+  assert.equal(scans, 0)
+})
+
 test('decoder enforces exact input/output byte limits and rejects corruption before returning content', () => {
   const encoded = encodeSearchResults(source)
   const inputBytes = Buffer.byteLength(encoded)

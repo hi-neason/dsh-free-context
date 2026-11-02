@@ -24,9 +24,13 @@ function parseLine(line) {
   if (match && validPath(match[1]) && validLineNumber(match[2]) && !/:\d+:/.test(match[3])) {
     return { path: match[1], number: match[2], separator: ':', text: match[3] }
   }
-  const separators = [...line.matchAll(/(?=-(\d+)-)/g)]
-  if (separators.length !== 1) return undefined
-  const [{ index, 1: number }] = separators
+  let separator
+  for (const candidate of line.matchAll(/(?=-(\d+)-)/g)) {
+    if (separator) return undefined
+    separator = candidate
+  }
+  if (!separator) return undefined
+  const { index, 1: number } = separator
   const path = line.slice(0, index)
   if (!validPath(path) || !validLineNumber(number)) return undefined
   return { path, number, separator: '-', text: line.slice(index + number.length + 2) }
@@ -38,7 +42,7 @@ function parseLine(line) {
  */
 export function encodeSearchResults(text, { maxInputBytes = 1024 * 1024, maxOutputBytes = 1024 * 1024 } = {}) {
   budgets(maxInputBytes, maxOutputBytes)
-  if (typeof text !== 'string' || !text || !text.isWellFormed() || text.trimStart().startsWith(marker)) return undefined
+  if (typeof text !== 'string' || !text || text.length > maxInputBytes || !text.isWellFormed() || text.trimStart().startsWith(marker)) return undefined
   const bytes = Buffer.byteLength(text)
   if (bytes > maxInputBytes) return undefined
   const paths = []
@@ -71,7 +75,7 @@ export function encodeSearchResults(text, { maxInputBytes = 1024 * 1024, maxOutp
 export function decodeSearchResults(encoded, { maxInputBytes = 1024 * 1024, maxOutputBytes = 1024 * 1024 } = {}) {
   budgets(maxInputBytes, maxOutputBytes)
   const invalid = () => { throw new TypeError('Invalid or oversized search encoding') }
-  if (typeof encoded !== 'string' || !encoded.isWellFormed() || Buffer.byteLength(encoded) > maxInputBytes || !encoded.startsWith(header)) invalid()
+  if (typeof encoded !== 'string' || encoded.length > maxInputBytes || !encoded.isWellFormed() || Buffer.byteLength(encoded) > maxInputBytes || !encoded.startsWith(header)) invalid()
   const json = encoded.slice(header.length)
   let body
   try { body = JSON.parse(json) } catch { invalid() }

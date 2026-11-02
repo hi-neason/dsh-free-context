@@ -18,7 +18,7 @@ function validateBudgets(maxInputBytes, maxOutputBytes) {
  */
 export function encodeLosslessText(text, { maxInputBytes = 1024 * 1024, maxOutputBytes = 1024 * 1024 } = {}) {
   validateBudgets(maxInputBytes, maxOutputBytes)
-  if (typeof text !== 'string' || !text.length || !text.isWellFormed()) return undefined
+  if (typeof text !== 'string' || !text.length || text.length > maxInputBytes || !text.isWellFormed()) return undefined
   const bytes = Buffer.byteLength(text)
   if (bytes > maxInputBytes || isEnvelope(text)) return undefined
   const encoded = header + JSON.stringify({ version: 1, bytes, sha256: hash(text), source: encodeSourceSpans([{ id: 'text', text }]) })
@@ -34,7 +34,7 @@ export function encodeLosslessText(text, { maxInputBytes = 1024 * 1024, maxOutpu
 export function decodeLosslessText(encoded, { maxInputBytes = 1024 * 1024, maxOutputBytes = 1024 * 1024 } = {}) {
   validateBudgets(maxInputBytes, maxOutputBytes)
   const invalid = () => { throw new TypeError('Invalid or oversized lossless text encoding') }
-  if (typeof encoded !== 'string' || !encoded.isWellFormed() || Buffer.byteLength(encoded) > maxInputBytes) invalid()
+  if (typeof encoded !== 'string' || encoded.length > maxInputBytes || !encoded.isWellFormed() || Buffer.byteLength(encoded) > maxInputBytes) invalid()
   // Persisted v1 frames retain the original prose header; accept both exact forms.
   const matchedHeader = [header, legacyHeader].find(candidate => encoded.startsWith(candidate))
   if (!matchedHeader) invalid()
