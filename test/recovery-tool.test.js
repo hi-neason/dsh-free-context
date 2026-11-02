@@ -180,3 +180,36 @@ test('batch recovery keeps per-call integrity verification for mutable backends'
   await assert.rejects(tool.execute(args, exec), /hash/)
   assert.equal(state.reads, 4)
 })
+
+test('small recovery pages do not materialize every character of a large snapshot', async t => {
+  const text = 'x'.repeat(1024 * 1024)
+  const item = setup(text, { pageCharacters: 2048 })
+  const from = Array.from
+  let expanded = 0
+  t.mock.method(Array, 'from', function (value, ...args) {
+    if (value === text) expanded++
+    return from.call(this, value, ...args)
+  })
+  const result = await item.tool.execute({ referenceId: item.referenceId, offset: 100, limit: 20 }, item.exec)
+  assert.equal(result.text, 'x'.repeat(20))
+  assert.equal(result.totalCharacters, text.length)
+  assert.equal(expanded, 0)
+})
+
+test('batch pages agree with Unicode code-point slicing for overlapping and unordered ranges', async () => {
+  for (let seed = 0; seed < 24; seed++) {
+    const text = '\ufeff' + '中😀\r\nA𠮷e\u0301'.repeat(seed + 1)
+    const characters = Array.from(text)
+    const item = setup(text, { pageCharacters: 16, maxBatchCharacters: 64 })
+    const ranges = [{ offset: characters.length, limit: 1 }, { offset: seed, limit: 16 },
+      { offset: 0, limit: 1 }, { offset: seed, limit: 4 }]
+    const result = await item.tool.execute({ referenceId: item.referenceId, ranges }, item.exec)
+    assert.equal(result.totalCharacters, characters.length)
+    assert.deepEqual(result.pages, ranges.map(({ offset, limit }) => {
+      const end = Math.min(offset + limit, characters.length)
+      return { offset, nextOffset: end < characters.length ? end : null,
+        pageComplete: offset === 0 && end === characters.length, text: characters.slice(offset, end).join('') }
+    }))
+    await assert.rejects(item.tool.execute({ referenceId: item.referenceId, offset: characters.length + 1 }, item.exec), /offset/)
+  }
+})

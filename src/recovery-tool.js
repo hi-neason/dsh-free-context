@@ -99,18 +99,33 @@ export function installSnapshotRecovery(ctx, {
       }
       // Fatal UTF-8 decoding preserves BOM and prevents replacement-character
       // substitution from being presented as exact snapshot text.
-      const characters = Array.from(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes))
+      const snapshotText = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+      // Retain only requested slice boundaries instead of an array containing
+      // every code point. Fatal UTF-8 decoding guarantees paired surrogates.
+      const boundaries = [...new Set(ranges.flatMap(({ offset, limit }) => [offset, offset + limit]))].sort((a, b) => a - b)
+      const positions = new Map()
+      let totalCharacters = 0
+      let boundary = 0
+      for (let index = 0; index < snapshotText.length; totalCharacters++) {
+        if (boundaries[boundary] === totalCharacters) {
+          positions.set(totalCharacters, index)
+          boundary++
+        }
+        const unit = snapshotText.charCodeAt(index)
+        index += unit >= 0xd800 && unit <= 0xdbff ? 2 : 1
+      }
+      positions.set(totalCharacters, snapshotText.length)
       // Validate all offsets before returning any page; batch failure is atomic.
-      if (ranges.some(range => range.offset > characters.length)) throw new RangeError('Recovery offset exceeds snapshot characters')
+      if (ranges.some(range => range.offset > totalCharacters)) throw new RangeError('Recovery offset exceeds snapshot characters')
       const pages = ranges.map(({ offset, limit }) => {
-        const end = Math.min(offset + limit, characters.length)
-        return { pageComplete: offset === 0 && end === characters.length, offset,
-          nextOffset: end < characters.length ? end : null, text: characters.slice(offset, end).join('') }
+        const end = Math.min(offset + limit, totalCharacters)
+        return { pageComplete: offset === 0 && end === totalCharacters, offset,
+          nextOffset: end < totalCharacters ? end : null, text: snapshotText.slice(positions.get(offset), positions.get(end)) }
       })
       const verified = { referenceId, sha256: expected.sha256, bytes: expected.bytes, snapshotVerified: true }
-      if (batch) return { ...verified, totalCharacters: characters.length, pages }
+      if (batch) return { ...verified, totalCharacters, pages }
       const { pageComplete, offset, nextOffset, text } = pages[0]
-      return { ...verified, pageComplete, offset, nextOffset, totalCharacters: characters.length, text }
+      return { ...verified, pageComplete, offset, nextOffset, totalCharacters, text }
     },
   }
   const unregister = ctx.tools.register(definition)
