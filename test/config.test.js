@@ -61,3 +61,23 @@ test('Standard Schema accepts and normalizes config synchronously', () => {
   assert.equal(Config['~standard'].version, 1)
   assert.deepEqual(Config['~standard'].validate({ tools: ['read'] }).value, parseConfig({ tools: ['read'] }))
 })
+
+test('text savings ratio is optional, finite, bounded, copied and strategy-specific', () => {
+  for (const minSavingsRatio of [0, 0.1, 0.5, 0.99]) {
+    const input = { text: { enabled: true, minSavingsRatio } }
+    const config = parseConfig(input)
+    input.text.minSavingsRatio = 1
+    assert.deepEqual(config.text, { enabled: true, minSavingsRatio })
+    assert.ok(Object.isFrozen(config.text))
+  }
+  assert.deepEqual(parseConfig({ text: { minSavingsRatio: 0.1 } }).text, { enabled: false, minSavingsRatio: 0.1 })
+  for (const minSavingsRatio of [-0.1, 1, 2, NaN, Infinity, -Infinity, '0.1', null, undefined, true]) {
+    const input = { text: { enabled: true, minSavingsRatio } }
+    assert.throws(() => parseConfig(input), TypeError)
+    assert.ok(Config['~standard'].validate(input).issues.length)
+  }
+  for (const key of ['json', 'logs', 'search', 'readText']) {
+    assert.throws(() => parseConfig({ [key]: { minSavingsRatio: 0.1 } }), TypeError)
+  }
+  assert.throws(() => parseConfig({ text: { minSavingsRatio: 0.1, unknown: true } }), TypeError)
+})

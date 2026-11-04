@@ -77,19 +77,19 @@ export function createContentRouter(config, { estimator, getStore = () => undefi
       // Exact generic-text decoding alone does not establish field-use quality.
       try { JSON.parse(block.text); return undefined } catch { /* Non-JSON text may use the generic codec. */ }
       const candidates = []
-      const addCandidate = (encoded, strategy, ratio) => {
+      const addCandidate = (encoded, strategy, minSavingsRatio) => {
         if (encoded === undefined) return
         const replacement = [{ ...block, text: encoded }]
         const output = measureContent(replacement, estimator)
-        if (smaller(replacement, output) && output.bytes * ratio <= input.bytes &&
-            output.estimatedTokens * ratio <= input.estimatedTokens) {
+        if (smaller(replacement, output) && output.bytes <= input.bytes * (1 - minSavingsRatio) &&
+            output.estimatedTokens <= input.estimatedTokens * (1 - minSavingsRatio)) {
           candidates.push({ content: replacement, strategy, output })
         }
       }
       const budgets = { maxInputBytes: config.maxInputBytes, maxOutputBytes: config.maxInputBytes }
-      if (config.search.enabled) addCandidate(encodeSearchResults(block.text, budgets), 'search-paths-v1', 1)
-      // General text still requires at least 50% reduction of its full frame.
-      if (config.text.enabled) addCandidate(encodeLosslessText(block.text, budgets), 'tool-lossless-text-v1', 2)
+      if (config.search.enabled) addCandidate(encodeSearchResults(block.text, budgets), 'search-paths-v1', 0)
+      // General text defaults to 50% savings, including its complete frame.
+      if (config.text.enabled) addCandidate(encodeLosslessText(block.text, budgets), 'tool-lossless-text-v1', config.text.minSavingsRatio ?? 0.5)
       candidates.sort((a, b) => a.output.estimatedTokens - b.output.estimatedTokens || a.output.bytes - b.output.bytes)
       if (candidates.length) {
         const { content, strategy } = candidates[0]

@@ -26,6 +26,22 @@ function strategy(input, key, fallback) {
   return Object.freeze({ enabled })
 }
 
+function textStrategy(input) {
+  const value = Object.hasOwn(input, 'text') ? input.text : {}
+  object(value, ['enabled', 'minSavingsRatio'], 'text')
+  const enabled = Object.hasOwn(value, 'enabled') ? value.enabled : false
+  if (typeof enabled !== 'boolean') throw new TypeError('text.enabled must be boolean')
+  const result = { enabled }
+  if (Object.hasOwn(value, 'minSavingsRatio')) {
+    const ratio = value.minSavingsRatio
+    if (!Number.isFinite(ratio) || ratio < 0 || ratio >= 1) {
+      throw new TypeError('text.minSavingsRatio must be a finite number >= 0 and < 1')
+    }
+    result.minSavingsRatio = ratio
+  }
+  return Object.freeze(result)
+}
+
 function readTextStrategy(input) {
   const value = Object.hasOwn(input, 'readText') ? input.readText : {}
   object(value, ['enabled', 'encodeArtifacts'], 'readText')
@@ -59,7 +75,7 @@ export function parseConfig(input = {}) {
     mode, tools: Object.freeze([...tools]), minInputBytes, maxInputBytes,
     minSavingsTokens: integer(input, 'minSavingsTokens', 32),
     json: strategy(input, 'json', true), logs: strategy(input, 'logs', false),
-    text: strategy(input, 'text', false), search: strategy(input, 'search', false), readText: readTextStrategy(input),
+    text: textStrategy(input), search: strategy(input, 'search', false), readText: readTextStrategy(input),
     retirement: resolveRetirementConfig(Object.hasOwn(input, 'retirement') ? input.retirement : {}),
   })
 }
