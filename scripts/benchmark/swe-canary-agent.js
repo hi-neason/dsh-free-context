@@ -85,6 +85,7 @@ export async function runSweCanaryTask({ directory, containerName, instanceId, p
   for (const value of [maxSteps, maxCalls, timeoutMs, maxOutputTokens]) if (!Number.isSafeInteger(value) || value < 1) throw new TypeError('Invalid limit')
   if (!Number.isFinite(maxCostUSD) || maxCostUSD <= 0) throw new TypeError('Invalid cost limit')
   if (typeof problemStatement !== 'string' || !problemStatement.trim()) throw new TypeError('Problem statement required')
+  if (!adapterFactory && model !== 'deepseek-flash') throw new TypeError('Real benchmark calls require deepseek-flash; other models are forbidden')
   if (!adapterFactory && !key) throw new TypeError('Provider key required')
   if (!/^[a-f0-9]{40}$/.test(baseCommit ?? '')) throw new TypeError('Immutable baseCommit required')
   directory = resolve(directory)
@@ -136,6 +137,7 @@ export async function runSweCanaryTask({ directory, containerName, instanceId, p
       return decision
     }, { prepend: true })
     ctx.on('llm/stream', (request, next) => (async function* () {
+      if (!adapterFactory && request.model !== 'deepseek-flash') throw new TypeError('Real benchmark requests require deepseek-flash')
       // Actual-usage mode does not reserve an estimated next-request cost.
       const reservedUSD = costGuard === 'request-reserve' ? callReservation(request, maxOutputTokens, pricing) : 0
       const blocked = budgetBlock(modelCalls, reservedUSD, maxCalls, maxCostUSD, pricing, costGuard)
