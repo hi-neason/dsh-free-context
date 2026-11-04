@@ -9,6 +9,7 @@ import { safeFailure, validUsage } from '../evaluation-accounting.js'
 import { runSweCanaryTask, dockerCommand, completeCall } from './swe-canary-agent.js'
 import { clearContainerProcesses, scorePatch } from './run-swe-canary.js'
 import { pricedCNY, recoverPairedCalls, additionalRecoveredCost, totalTokens } from './run-swe-paired.js'
+import { validatePriorAccounting } from './settled-budget.js'
 
 const execute = promisify(execFile)
 const run = (command, args) => execute(command, args, { timeout: 60000, maxBuffer: 16 * 1024 * 1024 })
@@ -54,7 +55,7 @@ export function comparePlugin(baseline, report) {
 
 export function parseArguments(args) {
   const options = { run: false }
-  const names = { '--baseline': 'baselineFile', '--reference-plan': 'referencePlan', '--root': 'root', '--plugin-config': 'pluginConfig', '--prior-spent-cny': 'priorKnownCNY' }
+  const names = { '--baseline': 'baselineFile', '--reference-plan': 'referencePlan', '--root': 'root', '--plugin-config': 'pluginConfig', '--prior-spent-cny': 'priorKnownCNY', '--prior-accounting-file': 'priorAccountingFile' }
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--run' && !options.run) { options.run = true; continue }
     const name = names[args[i]]
@@ -85,6 +86,9 @@ export async function preparePluginStudy(options) {
   }
   const config = { ...reference.config, root, priorKnownCNY: options.priorKnownCNY, authorizedAdditionalCNY: 50 }
   if (options.pluginConfig) config.pluginConfiguration = JSON.parse(await readFile(options.pluginConfig))
+  const priorAccounting = options.priorAccountingFile
+    ? await validatePriorAccounting(options.priorAccountingFile, config.priorKnownCNY, config.cnyPricing, root)
+    : undefined
   const limit = actualTaskLimit(config, 0)
   const fixed = [ [baselineFile, hash(bytes)], [sidecar, hash(await readFile(sidecar))], [referencePlan, baseline.source.referencePlanHash],
     [config.selectionFile, baseline.source.selectionHash],
@@ -99,19 +103,21 @@ export async function preparePluginStudy(options) {
   }
   for (const task of baseline.identities) fixed.push([task.taskFile, task.expected.taskHash], [task.evalScript, task.expected.evalScriptHash], [task.preflightFile, task.preflightHash])
   if (options.pluginConfig) fixed.push([resolve(options.pluginConfig), hash(await readFile(options.pluginConfig))])
+  if (priorAccounting) for (const item of priorAccounting.hashes) fixed.push([item.file, item.sha256])
   const sourceTreeHash = await acceptanceSourceHash(process.cwd())
   async function frozen() {
     if (await acceptanceSourceHash(process.cwd()) !== sourceTreeHash) return false
     for (const [file, sha256] of fixed) if (hash(await readFile(file)) !== sha256) return false
-    return true
+    return !priorAccounting || await priorAccounting.verifyInventory()
   }
   if (!await frozen()) throw new Error('Frozen baseline, evaluator, runtime or task drift')
   const plan = { version: 'swe-plugin-historical-comparison-v1', createdAt: new Date().toISOString(), root, config, scheduled, identities: baseline.identities, sourceTreeHash,
+    ...(priorAccounting ? { priorAccounting: { ...priorAccounting.audit, file: priorAccounting.file, sha256: priorAccounting.sha256 } } : {}),
     baselineFile, baselineHash: hash(bytes), referencePlan, pluginConfigurationChanged: !isDeepStrictEqual(config.pluginConfiguration, baseline.protocol.pluginConfiguration),
     hashes: fixed.map(([file, sha256]) => ({ file, sha256 })),
     budget: { priorKnownCNY: config.priorKnownCNY, remainingCNY: limit.remainingCNY, reservationCNY: 0, historicalPriorCNY: 18.02921736, cumulativeAuthorizedCNY: 70 },
     design: 'Historical cross-time baseline comparison; only plugin reruns. Five previously observed tasks, not a held-out or full benchmark score; no statistical equivalence claim.' }
-  return { plan, baseline, frozen }
+  return { plan, baseline, frozen, ...(priorAccounting ? { priorAccounting } : {}) }
 }
 
 async function archiveSources(root) {
@@ -136,7 +142,7 @@ async function archiveSources(root) {
 }
 
 export async function runPluginStudy(options) {
-  const { plan, baseline, frozen } = await preparePluginStudy(options)
+  const { plan, baseline, frozen, priorAccounting } = await preparePluginStudy(options)
   const root = plan.root
   const config = plan.config
   for (const task of plan.identities) {
@@ -145,6 +151,7 @@ export async function runPluginStudy(options) {
   }
   await mkdir(root, { mode: 0o700 })
   await archiveSources(root)
+  if (priorAccounting) await writeFile(join(root, 'prior-accounting.json'), priorAccounting.ledgerBytes, { flag: 'wx', mode: 0o600 })
   await writeFile(join(root, 'study-plan.json'), JSON.stringify(plan, null, 2), { flag: 'wx', mode: 0o600 })
   await copyFile(self, join(root, 'runner.mjs'))
   await writeFile(join(root, 'config.json'), JSON.stringify(config, null, 2), { flag: 'wx', mode: 0o600 })
