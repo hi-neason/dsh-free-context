@@ -5,6 +5,7 @@ import { createContentRouter } from './router.js'
 import { createPostExecuteHandler } from './pipeline.js'
 import { installReadTracking } from './read-lifecycle.js'
 import { installRetirement } from './retirement.js'
+import { installHistoryCheckpoint } from './history-checkpoint.js'
 
 export const name = 'dsh-free-context'
 export const inject = ['tools']
@@ -20,6 +21,8 @@ export function apply(ctx, input) {
   const estimate = tokenEstimator?.estimate.bind(tokenEstimator)
   const estimator = estimate ? (_bytes, serialized) => estimate(serialized) : undefined
   const snapshotTracking = config.retirement.enabled || (config.tools.length && (config.logs.enabled || config.readText.enabled)) ? getSnapshotTracking(ctx) : undefined
+  if (config.checkpoint?.enabled) installHistoryCheckpoint(ctx, config.checkpoint, { mode: config.mode,
+    onDecision: record => ctx.parallel('free-context/checkpoint', record) })
   if (config.retirement.enabled) {
     const readTracking = config.retirement.tools.includes('read') ? installReadTracking(ctx) : undefined
     installRetirement(ctx, config.retirement, { readTracking, mode: config.mode, onSnapshot: snapshotTracking?.record,

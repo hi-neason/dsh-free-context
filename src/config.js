@@ -1,6 +1,7 @@
 import { resolveRetirementConfig } from './retirement.js'
+import { resolveCheckpointConfig } from './history-checkpoint.js'
 
-const keys = ['mode', 'tools', 'minInputBytes', 'maxInputBytes', 'minSavingsTokens', 'json', 'logs', 'text', 'search', 'readText', 'retirement']
+const keys = ['mode', 'tools', 'minInputBytes', 'maxInputBytes', 'minSavingsTokens', 'json', 'logs', 'text', 'search', 'readText', 'retirement', 'checkpoint']
 
 function object(value, allowed, path) {
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
@@ -71,12 +72,15 @@ export function parseConfig(input = {}) {
   if (maxInputBytes === 0 || minInputBytes > maxInputBytes) {
     throw new TypeError('maxInputBytes must be positive and at least minInputBytes')
   }
+  const checkpoint = Object.hasOwn(input, 'checkpoint') ? resolveCheckpointConfig(input.checkpoint) : undefined
+  const retirement = resolveRetirementConfig(Object.hasOwn(input, 'retirement') ? input.retirement : {})
+  if (checkpoint?.enabled && retirement.enabled) throw new TypeError('Checkpoint and tool retirement must be tested separately')
   return Object.freeze({
     mode, tools: Object.freeze([...tools]), minInputBytes, maxInputBytes,
     minSavingsTokens: integer(input, 'minSavingsTokens', 32),
     json: strategy(input, 'json', true), logs: strategy(input, 'logs', false),
     text: textStrategy(input), search: strategy(input, 'search', false), readText: readTextStrategy(input),
-    retirement: resolveRetirementConfig(Object.hasOwn(input, 'retirement') ? input.retirement : {}),
+    retirement, ...(checkpoint ? { checkpoint } : {}),
   })
 }
 
