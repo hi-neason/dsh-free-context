@@ -6,6 +6,7 @@ import { createPostExecuteHandler } from './pipeline.js'
 import { installReadTracking } from './read-lifecycle.js'
 import { installRetirement } from './retirement.js'
 import { installHistoryCheckpoint } from './history-checkpoint.js'
+import { installExecutionHints } from './execution-hints.js'
 
 export const name = 'dsh-free-context'
 export const inject = ['tools']
@@ -14,6 +15,7 @@ export const inject = ['tools']
 export function apply(ctx, input) {
   const config = parseConfig(input)
   if (config.mode === 'off') return
+  if (config.executionHints?.enabled) installExecutionHints(ctx, config.executionHints, { mode: config.mode })
   const tokenEstimator = ctx.get?.('freeContextTokenEstimator')
   if (tokenEstimator !== undefined && typeof tokenEstimator?.estimate !== 'function') throw new TypeError('Invalid freeContextTokenEstimator estimator')
   // Bind once so original and candidate are always priced by the same adapter.
