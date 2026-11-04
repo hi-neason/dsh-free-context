@@ -1,6 +1,8 @@
 import { archiveOriginal, formatSnapshotReference } from './snapshot.js'
 import { assessNetBenefit, calibrateRequestForecast } from './economics.js'
 import { hashReadContent } from './read-lifecycle.js'
+import { createRetirementTextMeter } from './retirement-meter.js'
+import { hasProtectedCommandEvidence, installVerifiedSuccessTracking } from './retirement-success.js'
 
 const MARKER = '[dsh-free-context retired v1]\n'
 const defaults = { enabled: false, tools: [], minInputBytes: 8192, minSavingsTokens: 32,
@@ -71,8 +73,11 @@ function previousRetirements(events) {
 // Tool infrastructure success does not imply command success. In particular,
 // official bash/pwsh encode nonzero exits and interruptions as ordinary text.
 function protectedEvidence(text) {
-  return /^\[(?:stderr\]|exit code:|timed out|stopped:|killed by signal:|still running|sandbox:|some output was dropped|output truncated;)/mi.test(text) ||
-    /\b(?:error|fatal|exception|failed|failure|warning)\b|^not ok\b/im.test(text)
+  // Encoded and partially spilled frames can conceal command-status lines.
+  return /\[dsh-(?:lossless-text|search-results):|"format"\s*:\s*"dsh-json-rows"/.test(text) ||
+    /^\[(?:stderr\]|exit code:|timed out|stopped:|killed by signal:|still running|sandbox:|some output was dropped|output truncated;)/mi.test(text) ||
+    /^(?:STDERR:|Exit code:\s*(?:-[1-9]\d*|[1-9]\d*)\b|Traceback \(most recent call last\):)/mi.test(text) ||
+    /\b(?:[A-Za-z_][\w.]*(?:Error|Exception)|error|fatal|exception|failed|failure|warning)\b|^not ok\b/im.test(text)
 }
 
 function excerpt(text, characters) {
@@ -95,7 +100,14 @@ export class RetirementProtocolError extends Error {
 export function resolveRetirementConfig(input = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input) ||
     ![Object.prototype, null].includes(Object.getPrototypeOf(input))) throw new TypeError('Invalid retirement config')
-  for (const key of Reflect.ownKeys(input)) if (!Object.hasOwn(defaults, key) && !costKeys.includes(key) && key !== 'forecast') throw new TypeError(`Unknown retirement option: ${String(key)}`)
+  for (const key of Reflect.ownKeys(input)) if (!Object.hasOwn(defaults, key) && !costKeys.includes(key) &&
+    !['forecast', 'objective', 'tokenEstimator', 'allowVerifiedSuccess'].includes(key)) throw new TypeError(`Unknown retirement option: ${String(key)}`)
+  if (input.objective !== undefined && !['cost', 'tokens'].includes(input.objective)) throw new TypeError('Invalid retirement objective')
+  if (input.tokenEstimator !== undefined && (input.tokenEstimator !== 'dsh-rc2-text-v1' || input.objective !== 'tokens')) {
+    throw new TypeError('Retirement text estimator requires the explicit tokens objective')
+  }
+  if (input.allowVerifiedSuccess !== undefined && (typeof input.allowVerifiedSuccess !== 'boolean' ||
+      (input.allowVerifiedSuccess && input.objective !== 'tokens'))) throw new TypeError('Verified success requires the tokens objective')
   if (input.pricing !== undefined) {
     for (const key of Reflect.ownKeys(input.pricing)) {
       if (!['uncachedInputPerMillion', 'cacheReadPerMillion', 'cacheWritePerMillion'].includes(key)) throw new TypeError('Unknown retirement price')
@@ -184,20 +196,28 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
       report('incomplete-shadow-protocol'); throw new RetirementProtocolError(reports)
     }
   }
-  const meter = services.tokenMeter
+  const tokenObjective = config.objective === 'tokens'
+  const hostMeter = services.tokenMeter
+  const meter = hostMeter ?? (tokenObjective && config.tokenEstimator === 'dsh-rc2-text-v1' ? createRetirementTextMeter() : undefined)
   if (!meter || typeof meter.estimateMessage !== 'function' || typeof meter.measure !== 'function') {
     report('missing-token-meter'); return reports
   }
+  const objectiveMetadata = tokenObjective ? {
+    objective: 'tokens', estimateKind: meter.estimateKind ?? 'host-token-meter', costGateEnforced: false,
+  } : {}
   const economicInputs = Object.fromEntries(costKeys.map(key => [key, config[key]]))
   const assumptions = assessNetBenefit({ originalTokens: 2, candidateTokens: 1,
     invalidatedPrefixTokens: 1, compressionCost: 0, ...economicInputs })
-  if (assumptions.reason === 'missing-input') { report('missing-economic-assumptions'); return reports }
+  if (!tokenObjective && assumptions.reason === 'missing-input') { report('missing-economic-assumptions'); return reports }
   // These outcomes are independent of candidate size; reject before archiving.
   // Other placeholder estimates cannot establish the actual candidate's benefit.
-  if (['no-future-requests', 'no-cache-read-savings'].includes(assumptions.reason)) {
+  if (!tokenObjective && ['no-future-requests', 'no-cache-read-savings'].includes(assumptions.reason)) {
     report('economic-gate', { economics: assumptions }); return reports
   }
   if (!events || !services.spillStore) { report('missing-session-or-storage'); return reports }
+  if (!hostMeter) {
+    try { meter.measure(session) } catch { report('unsupported-token-estimate', objectiveMetadata); return reports }
+  }
   let boundary
   let taskProvider
   if (config.phasePolicy === 'boundary') {
@@ -233,7 +253,13 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
     if (!config.tools.includes(name) || original.isError || event.data.error || typeof text !== 'string' ||
       text.startsWith(MARKER) || Buffer.byteLength(text) < config.minInputBytes ||
       index.exposure.get(seq).steps < config.minAgeSteps) continue
-    if (protectedEvidence(text)) { report('protected-status-evidence', { callId }); continue }
+    let verifiedSuccess
+    if (config.allowVerifiedSuccess) {
+      try { verifiedSuccess = services.successTracking?.query(session, call, event) } catch {}
+    }
+    if (verifiedSuccess ? hasProtectedCommandEvidence(text) : protectedEvidence(text)) {
+      report('protected-status-evidence', { callId }); continue
+    }
     // Only committed model outcomes count. A step start or abandoned request is
     // not evidence of exposure; retries with committed attempts count separately.
     const modelUses = index.exposure.get(seq).uses
@@ -274,7 +300,9 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
       }
       if (!receipt) receipt = await saveReceipt()
       const assessReceipt = receipt => {
-        const policy = { modelUses, ...(boundary ?? {}) }
+        const policy = { modelUses, ...(boundary ?? {}), ...objectiveMetadata,
+          ...(config.allowVerifiedSuccess ? { verifiedSuccessUsed: Boolean(verifiedSuccess),
+            snapshotScope: 'model-visible-result', ...(verifiedSuccess ? { verifiedSuccess } : {}) } : {}) }
         const content = [{ type: 'text', text: MARKER + POLICY + JSON.stringify(policy) + '\n' +
           excerpt(text, config.excerptCharacters) + formatSnapshotReference(receipt) }]
         const message = { ...original, content }
@@ -284,13 +312,17 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
         }
         const originalTokens = finiteTokens(meter.estimateMessage(original))
         const candidateTokens = finiteTokens(meter.estimateMessage(message))
-        if (originalTokens - candidateTokens < config.minSavingsTokens) { report('insufficient-token-savings', { callId }); return undefined }
+        if (originalTokens <= candidateTokens || originalTokens - candidateTokens < config.minSavingsTokens) {
+          report('insufficient-token-savings', { callId }); return undefined
+        }
         const measurement = meter.measure(session)
         if (measurement.logRevision !== revision) { report('history-changed', { callId }); return undefined }
-        const retainedTokens = Math.max(finiteTokens(measurement.totalTokens), finiteTokens(measurement.surfaceTokens)) - originalTokens + candidateTokens
-        economics = assessNetBenefit({ originalTokens, candidateTokens,
-          invalidatedPrefixTokens: Math.max(0, retainedTokens), compressionCost: 0, ...economicInputs })
-        if (!economics.adopt) { report('economic-gate', { callId, economics }); return undefined }
+        if (hostMeter) {
+          const retainedTokens = Math.max(finiteTokens(measurement.totalTokens), finiteTokens(measurement.surfaceTokens)) - originalTokens + candidateTokens
+          economics = assessNetBenefit({ originalTokens, candidateTokens,
+            invalidatedPrefixTokens: Math.max(0, retainedTokens), compressionCost: 0, ...economicInputs })
+        } else economics = { adopt: false, reason: 'unavailable-host-cost-measurement' }
+        if (!tokenObjective && !economics.adopt) { report('economic-gate', { callId, economics }); return undefined }
         return { message, originalTokens }
       }
       let assessment = assessReceipt(receipt)
@@ -310,6 +342,9 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
         JSON.stringify(taskBoundary(taskProvider, session)) !== JSON.stringify(boundary))) {
         report('task-boundary-changed', { callId }); continue
       }
+      if (verifiedSuccess && JSON.stringify(services.successTracking?.query(session, call, event)) !== JSON.stringify(verifiedSuccess)) {
+        report('success-evidence-changed', { callId }); continue
+      }
       if (signal?.aborted || agent.session !== session || session.seq !== revision ||
         JSON.stringify([...session.surface.nodes]) !== JSON.stringify(nodes) || !nodes.includes(seq) ||
         session.eventAt(seq) !== event || JSON.stringify(session.deriveEventMessage(event)) !== originalImage ||
@@ -317,7 +352,7 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
         report(signal?.aborted ? 'aborted' : 'history-changed', { callId }); continue
       }
       if (services.mode === 'observe') {
-        report('observed', { callId, originalSeq: seq, economics, ...(snapshot ? { snapshot } : {}) }); continue
+        report('observed', { callId, originalSeq: seq, economics, ...objectiveMetadata, ...(snapshot ? { snapshot } : {}) }); continue
       }
       session.append('compaction/prune', { shadowedRange: { start: seq, end: seq },
         shadowedSeqs: [seq], shadowedTokenCount: originalTokens })
@@ -328,7 +363,7 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
       const replacement = session.append('tool/result', { ...event.data, message }, {
         surfaceOp: { op: 'replace', startSeq: seq, endSeq: seq }, sourceEventSeqs: [seq],
       })
-      report('retired', { callId, originalSeq: seq, replacementSeq: replacement.seq, economics, ...(snapshot ? { snapshot } : {}) })
+      report('retired', { callId, originalSeq: seq, replacementSeq: replacement.seq, economics, ...objectiveMetadata, ...(snapshot ? { snapshot } : {}) })
       // A boundary is a one-shot trigger, durably recorded in the replacement.
       // Other candidates wait for a new explicit stage or the configured cooldown.
       if (boundary || config.minStepsBetweenRetirements > 0) break
@@ -344,7 +379,7 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
         JSON.stringify(committed.sourceEventSeqs) === JSON.stringify([seq]) &&
         JSON.stringify(committed.data.message) === JSON.stringify(replacementMessage) &&
         session.surface.nodes.includes(committed.seq) && !session.surface.nodes.includes(seq)) {
-        report('retired', { callId, originalSeq: seq, replacementSeq: committed.seq, economics })
+        report('retired', { callId, originalSeq: seq, replacementSeq: committed.seq, economics, ...objectiveMetadata })
         if (boundary || config.minStepsBetweenRetirements > 0) break
         continue
       }
@@ -360,13 +395,15 @@ export async function retireHistory({ agent, signal }, input = {}, services = {}
 export function installRetirement(ctx, input = {}, services = {}) {
   const config = resolveRetirementConfig(input)
   if (!config.enabled) return () => {}
+  const successTracking = config.allowVerifiedSuccess ? installVerifiedSuccessTracking(ctx) : undefined
   const busy = new WeakSet()
-  return ctx.on('agent/pre-step', async (event, next) => {
+  const offStep = ctx.on('agent/pre-step', async (event, next) => {
     const session = event.agent?.session
     if (session && !busy.has(session)) {
       busy.add(session)
       try {
         await retireHistory(event, config, { ...services,
+          successTracking,
           tokenMeter: ctx.get('tokenMeter'), spillStore: ctx.get('spillStore'),
           getTaskState: () => ctx.get('freeContextTaskState'),
           onDecision(record) {
@@ -382,4 +419,5 @@ export function installRetirement(ctx, input = {}, services = {}) {
     }
     return next()
   })
+  return () => { offStep(); successTracking?.dispose() }
 }
