@@ -12,4 +12,5 @@
 /.omx-state-locks/
 /.omx-state-locks.identity.json
 /coverage/
+/scripts/benchmark/__pycache__/
 *.tgz
