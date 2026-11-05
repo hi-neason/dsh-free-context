@@ -1,3 +1,4 @@
+import { installCompletionReview } from './completion-review.js'
 import { getSnapshotTracking } from './snapshot-telemetry.js'
 import { isEligibleInput, parseConfig } from './config.js'
 export { Config } from './config.js'
@@ -15,6 +16,7 @@ export const inject = ['tools']
 export function apply(ctx, input) {
   const config = parseConfig(input)
   if (config.mode === 'off') return
+  if (config.completionReview?.enabled) installCompletionReview(ctx, config.completionReview, { mode: config.mode })
   if (config.executionHints?.enabled) installExecutionHints(ctx, config.executionHints, { mode: config.mode })
   const tokenEstimator = ctx.get?.('freeContextTokenEstimator')
   if (tokenEstimator !== undefined && typeof tokenEstimator?.estimate !== 'function') throw new TypeError('Invalid freeContextTokenEstimator estimator')

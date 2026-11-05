@@ -1,7 +1,8 @@
+import { parseCompletionReview } from './completion-review.js'
 import { resolveRetirementConfig } from './retirement.js'
 import { resolveCheckpointConfig } from './history-checkpoint.js'
 
-const keys = ['mode', 'tools', 'minInputBytes', 'maxInputBytes', 'minSavingsTokens', 'json', 'logs', 'text', 'search', 'readText', 'retirement', 'checkpoint', 'executionHints']
+const keys = ['mode', 'tools', 'minInputBytes', 'maxInputBytes', 'minSavingsTokens', 'json', 'logs', 'text', 'search', 'readText', 'retirement', 'checkpoint', 'executionHints', 'completionReview']
 
 function object(value, allowed, path) {
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
@@ -81,6 +82,7 @@ export function parseConfig(input = {}) {
     json: strategy(input, 'json', true), logs: strategy(input, 'logs', false),
     text: textStrategy(input), search: strategy(input, 'search', false), readText: readTextStrategy(input),
     retirement, ...(checkpoint ? { checkpoint } : {}),
+    ...(Object.hasOwn(input, 'completionReview') ? { completionReview: Object.freeze(parseCompletionReview(input.completionReview)) } : {}),
     ...(Object.hasOwn(input, 'executionHints') ? { executionHints: strategy(input, 'executionHints', false) } : {}),
   })
 }
