@@ -81,14 +81,16 @@ export async function validateFlashPrior(file, currentRoot) {
     }
     requireValue(near(Number(amount), component.costCNY), 'Prior component amount mismatch')
     if (component.mode === 'settled-wallet') {
-      const required = { 'nov2-nov3-settled': 'oldScopeWalletCNY', 'nov4-pro-history-settled': 'actualProviderWalletCNY' }
+      const required = { 'nov2-nov3-settled': 'oldScopeWalletCNY', 'nov4-pro-history-settled': 'actualProviderWalletCNY', 'nov4-flash-parent-settled': 'actualProviderWalletCNY' }
       requireValue(required[component.scope] === component.amountField && evidence.inputHashes, 'Unknown settled scope')
       for (const [name, sha256] of Object.entries(evidence.inputHashes)) {
         requireValue(evidenceHashes.get(resolve(name)) === sha256, 'Settled scope evidence is not fully bound')
       }
+      if (component.scope === 'nov4-flash-parent-settled') requireValue(isDeepStrictEqual(evidence.budgetComponent?.scope, ['flash-study-20261104-v1']),
+        'Flash settlement must cover exact parent only')
       const phases = component.scope === 'nov2-nov3-settled' ? evidence.scopes?.flatMap(scope => scope.phases) : evidence.budgetComponent?.scope
       requireValue(Array.isArray(phases) && phases.length > 0 && new Set(phases).size === phases.length, 'Settled financial scope is absent or duplicated')
-      if (component.scope === 'nov4-pro-history-settled') requireValue(evidence.budgetComponent.mode === 'settled-wallet' &&
+      if (component.scope !== 'nov2-nov3-settled') requireValue(evidence.budgetComponent.mode === 'settled-wallet' &&
         near(Number(evidence.budgetComponent.costCNY), component.costCNY), 'Settled financial amount mismatch')
       const proofHashes = new Map(Object.entries(evidence.inputHashes).map(([name, sha256]) => [resolve(name), sha256]))
       for (const phase of phases) {

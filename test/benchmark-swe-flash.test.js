@@ -223,3 +223,89 @@ test('task/evaluation creation timeout cleans exact owned IDs and retains known 
   }
 })
 const near = (a, b) => Math.abs(a - b) < 1e-8
+
+async function flashParentBudgetFixture(t) {
+  const f = await budgetFixture(t), phase = 'flash-study-20261104-v1', parentRoot = join(f.root, phase)
+  await mkdir(join(parentRoot, 'runs', '12-sympy__sympy-12419-baseline-tuned'), { recursive: true })
+  const reportFile = join(parentRoot, 'study-report.json'), rawFile = join(parentRoot, 'runs', '12-sympy__sympy-12419-baseline-tuned', 'model-calls.jsonl')
+  // Settled wallet covers an interrupted attempt without rewriting its unknown raw usage.
+  await writeFile(reportFile, JSON.stringify({ finished: false, accountingComplete: false }))
+  await writeFile(rawFile, journal({ ...call, usage: null }))
+  const evidenceFile = join(f.root, 'flash-parent-proof.json'), evidence = { allChecksPass: true, accountingComplete: true, checks: { officialWallet: true },
+    actualProviderWalletCNY: 2.17148828, inputHashes: { [reportFile]: sha(await readFile(reportFile)), [rawFile]: sha(await readFile(rawFile)) },
+    budgetComponent: { scope: [phase], mode: 'settled-wallet', costCNY: 2.17148828 } }
+  const component = { scope: 'nov4-flash-parent-settled', mode: 'settled-wallet', costCNY: 2.17148828, evidenceFile, amountField: 'actualProviderWalletCNY' }
+  f.ledger.components.push(component); f.ledger.priorKnownCNY += component.costCNY
+  async function writeProof() {
+    const bytes = JSON.stringify(evidence)
+    await writeFile(evidenceFile, bytes)
+    component.evidenceHash = sha(bytes)
+    Object.assign(f.ledger.inputHashes, evidence.inputHashes, { [evidenceFile]: component.evidenceHash })
+    await f.write()
+  }
+  await writeProof()
+  return { ...f, evidence, component, writeProof }
+}
+
+test('optional settled Flash parent scope accepts real wallet evidence and retains interrupted raw usage', async t => {
+  const f = await flashParentBudgetFixture(t)
+  const prior = await validateFlashPrior(f.file, join(f.root, 'future-plugin'))
+  assert.equal(prior.ledger.priorKnownCNY, 39.17389718)
+  assert.equal(prior.ledger.components.length, 3)
+})
+test('Flash parent cost cannot disappear while its evidence hashes remain', async t => {
+  const f = await flashParentBudgetFixture(t)
+  f.ledger.components.pop(); f.ledger.priorKnownCNY -= f.component.costCNY; await f.write()
+  await assert.rejects(validateFlashPrior(f.file, join(f.root, 'future-plugin')), /omits a study cost component/)
+})
+test('settled Flash parent rejects duplicate component and changed amount', async t => {
+  const f = await flashParentBudgetFixture(t)
+  f.ledger.components.push({ ...f.component }); await f.write()
+  await assert.rejects(validateFlashPrior(f.file, join(f.root, 'future-plugin')), /duplicate prior component/)
+  f.ledger.components.pop(); f.component.costCNY += .01; f.ledger.priorKnownCNY += .01; await f.write()
+  await assert.rejects(validateFlashPrior(f.file, join(f.root, 'future-plugin')), /amount mismatch/)
+})
+test('settled Flash parent binds proof financial amount and exact sole phase', async t => {
+  const f = await flashParentBudgetFixture(t)
+  f.evidence.budgetComponent.scope = ['flash-study-20261104-v1', 'unrelated']; await f.writeProof()
+  await assert.rejects(validateFlashPrior(f.file, join(f.root, 'future-plugin')), /exact parent only/)
+  f.evidence.budgetComponent.scope = ['wrong-parent']; await f.writeProof()
+  await assert.rejects(validateFlashPrior(f.file, join(f.root, 'future-plugin')), /exact parent only/)
+  f.evidence.budgetComponent.scope = ['flash-study-20261104-v1']; f.evidence.budgetComponent.costCNY += 1; await f.writeProof()
+  await assert.rejects(validateFlashPrior(f.file, join(f.root, 'future-plugin')), /financial amount mismatch/)
+})
+test('settled Flash parent proof checksum cannot be bypassed', async t => {
+  const f = await flashParentBudgetFixture(t)
+  await writeFile(f.component.evidenceFile, '{}')
+  await assert.rejects(validateFlashPrior(f.file, join(f.root, 'future-plugin')), /checksum mismatch/)
+})
+test('new Flash scope does not relax either mandatory historical scope', async t => {
+  for (const index of [0, 1]) {
+    const f = await flashParentBudgetFixture(t), [removed] = f.ledger.components.splice(index, 1)
+    f.ledger.priorKnownCNY -= removed.costCNY; await f.write()
+    await assert.rejects(validateFlashPrior(f.file, join(f.root, 'future-plugin')), /Required settled history/)
+  }
+})
+
+test('Flash wallet parent and three observed recovery attempts coexist without charging analysis bundle twice', async t => {
+  const f = await flashParentBudgetFixture(t), report = reportFixture(), recoveryRoot = join(f.root, 'flash-recovery-20261105-v1')
+  report.plan.scheduled = report.plan.scheduled.slice(12); report.tasks = report.tasks.slice(12); report.knownStudyCostCNY = cost * 3
+  await mkdir(recoveryRoot)
+  const reportFile = join(recoveryRoot, 'study-report.json'); await writeFile(reportFile, JSON.stringify(report))
+  f.ledger.inputHashes[reportFile] = sha(await readFile(reportFile))
+  for (const row of report.tasks) {
+    const runRoot = join(recoveryRoot, 'runs', `${row.slot}-${row.instanceId}-${row.group}`)
+    await mkdir(runRoot, { recursive: true })
+    const file = join(runRoot, 'model-calls.jsonl'); await writeFile(file, journal(call)); f.ledger.inputHashes[file] = sha(await readFile(file))
+  }
+  const evidenceFile = join(f.root, 'recovery-proof.json'), evidence = { allChecksPass: true, accountingComplete: true, checks: { observed: true }, costCNY: cost * 3 }
+  await writeFile(evidenceFile, JSON.stringify(evidence)); f.ledger.inputHashes[evidenceFile] = sha(await readFile(evidenceFile))
+  f.ledger.components.push({ scope: 'flash-recovery-20261105-v1', mode: 'observed-peak', costCNY: cost * 3, reportFile,
+    evidenceFile, evidenceHash: f.ledger.inputHashes[evidenceFile], amountField: 'costCNY' })
+  f.ledger.priorKnownCNY += cost * 3; await f.write()
+  const analysisRoot = join(f.root, 'flash-comparison-20261105-v1'); await mkdir(analysisRoot)
+  await writeFile(join(analysisRoot, 'comparison-report.json'), JSON.stringify({ analysisOnly: true, paidCalls: 0, tasks: report.tasks }))
+  const prior = await validateFlashPrior(f.file, join(f.root, 'future-plugin'))
+  assert.equal(prior.ledger.components.length, 4)
+  assert.equal(prior.ledger.priorKnownCNY, 39.17389718 + cost * 3)
+})
