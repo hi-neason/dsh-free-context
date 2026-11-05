@@ -7,7 +7,10 @@ export const executionHintText = [
   'Execution guidance for this task. Preserve the requested scope and investigate failures.',
   'Identify the repository-supported test runner and required settings before running tests.',
   'Read relevant source line ranges and reuse observations instead of repeating truncated whole-file reads.',
-  'Implement the requested fix and a focused regression test. Run relevant validation and inspect the diff before finishing.',
+  'Derive regression scenarios from the task requirements and exercise the public operations it names. Do not substitute a convenient internal shortcut for the requested behavior.',
+  'Confirm the regression fails before the fix, then verify each stated condition and relevant state or boundary variation, along with the related test suite.',
+  'Use the supplied task and repository as evidence; do not hunt for benchmark artifacts or prewritten reference fixes.',
+  'Run necessary validation and inspect the diff before finishing.',
   'Repeat a passing test when code, inputs, or environment changed, or a concrete unresolved question requires it. Otherwise reuse its result.',
   'Complete necessary verification and failure investigation, then summarize the change and evidence.',
 ].join(' ')
